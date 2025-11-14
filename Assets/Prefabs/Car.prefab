@@ -127,10 +127,10 @@ MonoBehaviour:
   CarID: 0
   TargetSpeed: 20
   MaxAcceleration: 5
-  MaxBraking: 5
+  MaxBraking: 8
   CarLength: 4
-  LookAheadDistance: 30
-  SafeFollowDistance: 15
+  LookAheadDistance: 20
+  SafeFollowDistance: 10
   MinimumCarBuffer: 1
   currentSpeed: 0
   distanceAlongPath: 0

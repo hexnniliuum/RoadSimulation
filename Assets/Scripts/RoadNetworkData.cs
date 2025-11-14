@@ -16,6 +16,15 @@ public class Node
         ID = id;
         Position = position;
     }
+    
+    /// <summary>
+    /// Check if this is a trivial intersection (only 2 roads connected).
+    /// These are essentially straight-through continuations, no collision possible.
+    /// </summary>
+    public bool IsTrivialIntersection()
+    {
+        return ConnectedRoads.Count == 2;
+    }
 }
 
 /// <summary>

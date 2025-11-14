@@ -74,7 +74,7 @@ public class RoadGenerationConfig : ScriptableObject
 
     [Header("Intersection Logic")]
     [Tooltip("Distance from lane end to start checking for intersection")]
-    public float IntersectionDetectionDistance = 15f;
+    public float IntersectionDetectionDistance = 25f;
     
     [Tooltip("Buffer distance before stop line (prevents overshooting)")]
     public float StopLineBuffer = 0.5f;

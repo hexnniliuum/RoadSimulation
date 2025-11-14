@@ -12,11 +12,11 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 3a0b075633905ab4a9017675f0bd046e, type: 3}
   m_Name: DefaultRoadConfig
   m_EditorClassIdentifier: Assembly-CSharp::RoadGenerationConfig
-  GridWidth: 8
-  GridHeight: 8
+  GridWidth: 5
+  GridHeight: 5
   MinSegmentLength: 15
   MaxSegmentLength: 100
-  IntersectionJitter: 50
+  IntersectionJitter: 20
   LaneWidth: 3.5
   StopLineDistance: 4
   TurnRadius: 5
@@ -28,5 +28,9 @@ MonoBehaviour:
   MinDistanceFromIntersection: 20
   MinBridgeCrossingAngle: 45
   DiagonalConnectionPercentage: 30
-  RandomSeed: 1485336296
+  RandomSeed: 0
   FloorHeight: 0
+  IntersectionDetectionDistance: 25
+  StopLineBuffer: 0.5
+  DeadlockTimeout: 5
+  TurnConflictThreshold: 4

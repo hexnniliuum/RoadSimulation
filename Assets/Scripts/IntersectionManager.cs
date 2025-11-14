@@ -14,7 +14,10 @@ public class IntersectionManager
     private Dictionary<TurnCurve, HashSet<TurnCurve>> turnConflicts;
     
     // Configuration
-    private float deadlockTimeout = 5f;
+    private float deadlockTimeout = 3f;
+    
+    // Deadlock breaking: track which car is currently allowed to force entry
+    private Dictionary<Node, CarController> carBreakingDeadlock;
     
     /// <summary>
     /// Initialize intersection management system with road network.
@@ -23,6 +26,7 @@ public class IntersectionManager
     {
         intersectionStates = new Dictionary<Node, IntersectionState>();
         turnConflicts = new Dictionary<TurnCurve, HashSet<TurnCurve>>();
+        carBreakingDeadlock = new Dictionary<Node, CarController>();
         
         // Debug.Log("IntersectionManager: Initializing...");
         
@@ -33,6 +37,7 @@ public class IntersectionManager
             {
                 IntersectionState state = new IntersectionState(node);
                 intersectionStates[node] = state;
+                carBreakingDeadlock[node] = null; // Initialize with no breaker
                 
                 // Debug.Log($"Intersection created at Node {node.ID} with {node.ConnectedRoads.Count} roads");
             }
@@ -68,32 +73,19 @@ public class IntersectionManager
             }
         }
         
-        // Check 2: DEADLOCK TIMEOUT - check FIRST to break circular deadlocks
-        // This must be before priority/conflict checks to be effective
-        if (state.waitingQueues.ContainsKey(fromLane))
+        // Check 2: DEADLOCK DETECTION - intersection-level, not per-car
+        // Only trigger if ALL cars at intersection are stuck
+        CheckAndBreakDeadlock(intersection, state, car);
+        
+        // Check 2.5: Is this the car chosen to break deadlock?
+        if (carBreakingDeadlock.ContainsKey(intersection) && carBreakingDeadlock[intersection] == car)
         {
-            var queue = state.waitingQueues[fromLane];
-            if (queue.Count > 0 && queue.Peek() == car)
-            {
-                // Check if this car has been waiting too long
-                float waitTime = Time.time - state.GetWaitStartTime(car);
-                
-                // Log wait time periodically for debugging (only for Node 7)
-                if (intersection.ID == 7 && waitTime > 2f && Mathf.FloorToInt(waitTime) != Mathf.FloorToInt(waitTime - Time.deltaTime))
-                {
-                    Debug.Log($"[NODE-7] Car {car.CarID}: Waiting {waitTime:F1}s (timeout at {deadlockTimeout}s)");
-                    LogIntersectionState(intersection, state);
-                }
-                
-                if (waitTime > deadlockTimeout)
-                {
-                    if (intersection.ID == 7)
-                        Debug.LogWarning($"[NODE-7] Car {car.CarID}: FORCING ENTRY after {waitTime:F1}s timeout");
-                    else
-                        Debug.LogWarning($"[DEADLOCK-BREAK] Car {car.CarID} at Node {intersection.ID}: Forcing entry");
-                    return true; // Force entry to break deadlock - SKIP all other checks
-                }
-            }
+            // if (intersection.ID == 7)
+            //     Debug.LogWarning($"[NODE-7] Car {car.CarID}: DEADLOCK BREAKER - forcing entry");
+            // else
+            //     Debug.LogWarning($"[DEADLOCK-BREAK] Car {car.CarID} at Node {intersection.ID}: Breaking deadlock");
+            
+            return true; // This car is allowed to force entry - SKIP all other checks
         }
         
         // Check 3: Path conflict - does intended turn overlap with active crossings?
@@ -104,8 +96,8 @@ public class IntersectionManager
             if (turnConflicts.ContainsKey(intendedTurn) && 
                 turnConflicts[intendedTurn].Contains(activeTurn))
             {
-                if (intersection.ID == 7)
-                    Debug.Log($"[NODE-7] Car {car.CarID}: BLOCKED by path conflict with Car {activeKvp.Key.CarID}");
+                // if (intersection.ID == 7)
+                //     Debug.Log($"[NODE-7] Car {car.CarID}: BLOCKED by path conflict with Car {activeKvp.Key.CarID}");
                 return false; // Path overlaps with active vehicle
             }
         }
@@ -113,8 +105,8 @@ public class IntersectionManager
         // Check 4: Priority to right
         if (HasPriorityVehicleOnRight(car, fromLane, intersection, out int blockingCarID))
         {
-            if (intersection.ID == 7)
-                Debug.Log($"[NODE-7] Car {car.CarID}: BLOCKED by priority-to-right (Car {blockingCarID})");
+            // if (intersection.ID == 7)
+            //     Debug.Log($"[NODE-7] Car {car.CarID}: BLOCKED by priority-to-right (Car {blockingCarID})");
             return false; // Vehicle on right has priority
         }
         
@@ -135,6 +127,14 @@ public class IntersectionManager
         var state = intersectionStates[intersection];
         state.activeCrossings[car] = turn;
         
+        // Clear deadlock breaker if this car was it
+        if (carBreakingDeadlock[intersection] == car)
+        {
+            carBreakingDeadlock[intersection] = null;
+            // if (intersection.ID == 7)
+            //     Debug.Log($"[NODE-7] Deadlock cleared - Car {car.CarID} entered");
+        }
+        
         // Debug.Log($"Car {car.CarID}: Entered intersection at Node {intersection.ID}");
     }
     
@@ -153,6 +153,92 @@ public class IntersectionManager
         state.activeCrossings.Remove(car);
         
         // Debug.Log($"Car {car.CarID}: Exited intersection at Node {intersection.ID}");
+    }
+    
+    /// <summary>
+    /// Check if there are any cars waiting at the given intersection.
+    /// Used for pre-approach queue detection.
+    /// </summary>
+    public bool HasWaitingCars(Node intersection)
+    {
+        if (!intersectionStates.ContainsKey(intersection))
+        {
+            return false;
+        }
+        
+        var state = intersectionStates[intersection];
+        
+        // Check if any lane has waiting cars
+        foreach (var queueKvp in state.waitingQueues)
+        {
+            if (queueKvp.Value.Count > 0)
+            {
+                return true;
+            }
+        }
+        
+        return false;
+    }
+    
+    /// <summary>
+    /// Check if there are multiple cars approaching the same intersection (within detection radius).
+    /// Returns true if 2+ cars are converging, indicating potential congestion.
+    /// </summary>
+    public bool HasApproachingCars(Node intersection, CarController excludeCar, float detectionRadius)
+    {
+        if (!intersectionStates.ContainsKey(intersection))
+        {
+            return false;
+        }
+        
+        Vector3 intersectionPos = intersection.Position;
+        int approachingCount = 0;
+        
+        // Find all cars in the simulation
+        CarController[] allCars = UnityEngine.Object.FindObjectsOfType<CarController>();
+        
+        foreach (var car in allCars)
+        {
+            // Skip the car we're checking for
+            if (car == excludeCar)
+                continue;
+            
+            // Check if car is within detection radius of intersection
+            float distance = Vector3.Distance(car.transform.position, intersectionPos);
+            
+            if (distance <= detectionRadius)
+            {
+                // Check if this car is actually heading towards this intersection
+                // (either in Approaching state targeting this node, or on a lane that ends at this node)
+                bool isHeadingToIntersection = false;
+                
+                if (car.CurrentCarState == CarController.CarState.Approaching && 
+                    car.CurrentLane != null && 
+                    car.CurrentLane.EndNode == intersection)
+                {
+                    isHeadingToIntersection = true;
+                }
+                else if (car.CurrentCarState == CarController.CarState.OnLane && 
+                         car.CurrentPathType == CarController.PathType.Lane &&
+                         car.CurrentLane != null && 
+                         car.CurrentLane.EndNode == intersection)
+                {
+                    isHeadingToIntersection = true;
+                }
+                
+                if (isHeadingToIntersection)
+                {
+                    approachingCount++;
+                    
+                    // If we find at least 1 other car approaching, return true
+                    // (2+ cars total including the excludeCar)
+                    if (approachingCount >= 1)
+                        return true;
+                }
+            }
+        }
+        
+        return false;
     }
     
     /// <summary>
@@ -206,39 +292,122 @@ public class IntersectionManager
     }
     
     /// <summary>
-    /// Log detailed intersection state for debugging deadlocks (Node 7 only).
+    /// Check if entire intersection is deadlocked and designate one car to break it.
+    /// Only ONE car at a time is allowed to force entry.
     /// </summary>
-    private void LogIntersectionState(Node intersection, IntersectionState state)
+    private void CheckAndBreakDeadlock(Node intersection, IntersectionState state, CarController requestingCar)
     {
-        if (intersection.ID != 7) return; // Only log Node 7
-        
-        Debug.Log($"[NODE-7] === STATE: {state.incomingLanes.Count} incoming lanes ===");
-        
-        // Log active crossings
-        Debug.Log($"[NODE-7] Active crossings: {state.activeCrossings.Count}");
-        foreach (var crossing in state.activeCrossings)
+        // Don't reassign if we already have a deadlock breaker
+        if (carBreakingDeadlock[intersection] != null)
         {
-            Debug.Log($"[NODE-7]   - Car {crossing.Key.CarID} (state: {crossing.Key.CurrentCarState}) from Lane {crossing.Value.FromLane.ID} to Lane {crossing.Value.ToLane.ID}");
+            return; // Let the current breaker finish
         }
         
-        // Log waiting queues
-        int totalWaiting = 0;
+        // If someone is actively crossing, no deadlock
+        if (state.activeCrossings.Count > 0)
+        {
+            return;
+        }
+        
+        // Collect all first-in-queue cars that are waiting
+        List<CarController> waitingCars = new List<CarController>();
+        float earliestWaitTime = float.MaxValue;
+        CarController longestWaitingCar = null;
+        
         foreach (var queueKvp in state.waitingQueues)
         {
             if (queueKvp.Value.Count > 0)
             {
-                totalWaiting += queueKvp.Value.Count;
-                var queueList = new System.Collections.Generic.List<CarController>(queueKvp.Value);
-                string carList = string.Join(", ", queueList.ConvertAll(c => $"Car{c.CarID}({c.CurrentCarState})"));
-                Debug.Log($"[NODE-7] Waiting on Lane {queueKvp.Key.ID}: {queueKvp.Value.Count} cars [{carList}]");
+                CarController firstCar = queueKvp.Value.Peek();
+                
+                // Only consider cars in WaitingToEnter state (not just approaching)
+                if (firstCar.CurrentCarState == CarController.CarState.WaitingToEnter)
+                {
+                    waitingCars.Add(firstCar);
+                    
+                    float waitStartTime = state.GetWaitStartTime(firstCar);
+                    if (waitStartTime < earliestWaitTime)
+                    {
+                        earliestWaitTime = waitStartTime;
+                        longestWaitingCar = firstCar;
+                    }
+                }
             }
         }
         
-        if (totalWaiting == 0)
+        // Need at least 2 cars waiting to be a deadlock
+        if (waitingCars.Count < 2)
         {
-            Debug.Log($"[NODE-7] No cars waiting");
+            return; // Not a deadlock, just normal waiting
+        }
+        
+        // Check if ALL waiting cars have been waiting > timeout
+        float currentTime = Time.time;
+        bool allStuck = true;
+        
+        foreach (var car in waitingCars)
+        {
+            float waitTime = currentTime - state.GetWaitStartTime(car);
+            if (waitTime < deadlockTimeout)
+            {
+                allStuck = false;
+                break;
+            }
+        }
+        
+        // DEADLOCK DETECTED: All cars stuck for > 3 seconds
+        if (allStuck && longestWaitingCar != null)
+        {
+            carBreakingDeadlock[intersection] = longestWaitingCar;
+            
+            // Deadlock logging disabled
+            // if (intersection.ID == 7)
+            // {
+            //     float longestWait = currentTime - earliestWaitTime;
+            //     Debug.LogWarning($"[NODE-7] DEADLOCK DETECTED: {waitingCars.Count} cars stuck. Designating Car {longestWaitingCar.CarID} (waiting {longestWait:F1}s) to break it");
+            //     LogIntersectionState(intersection, state);
+            // }
+            // else
+            // {
+            //     Debug.LogWarning($"[DEADLOCK] Node {intersection.ID}: {waitingCars.Count} cars stuck, Car {longestWaitingCar.CarID} will break it");
+            // }
         }
     }
+    
+    // /// <summary>
+    // /// Log detailed intersection state for debugging deadlocks (Node 7 only).
+    // /// </summary>
+    // private void LogIntersectionState(Node intersection, IntersectionState state)
+    // {
+    //     if (intersection.ID != 7) return; // Only log Node 7
+    //     
+    //     Debug.Log($"[NODE-7] === STATE: {state.incomingLanes.Count} incoming lanes ===");
+    //     
+    //     // Log active crossings
+    //     Debug.Log($"[NODE-7] Active crossings: {state.activeCrossings.Count}");
+    //     foreach (var crossing in state.activeCrossings)
+    //     {
+    //         Debug.Log($"[NODE-7]   - Car {crossing.Key.CarID} (state: {crossing.Key.CurrentCarState}) from Lane {crossing.Value.FromLane.ID} to Lane {crossing.Value.ToLane.ID}");
+    //     }
+    //     
+    //     // Log waiting queues
+    //     int totalWaiting = 0;
+    //     foreach (var queueKvp in state.waitingQueues)
+    //     {
+    //         if (queueKvp.Value.Count > 0)
+    //         {
+    //             totalWaiting += queueKvp.Value.Count;
+    //             var queueList = new System.Collections.Generic.List<CarController>(queueKvp.Value);
+    //             string carList = string.Join(", ", queueList.ConvertAll(c => $"Car{c.CarID}({c.CurrentCarState})"));
+    //             Debug.Log($"[NODE-7] Waiting on Lane {queueKvp.Key.ID}: {queueKvp.Value.Count} cars [{carList}]");
+    //         }
+    //     }
+    //     
+    //     if (totalWaiting == 0)
+    //     {
+    //         Debug.Log($"[NODE-7] No cars waiting");
+    //     }
+    // }
     
     /// <summary>
     /// Check if there's a vehicle on the right with priority.
