@@ -1,0 +1,32 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 3a0b075633905ab4a9017675f0bd046e, type: 3}
+  m_Name: DefaultRoadConfig
+  m_EditorClassIdentifier: Assembly-CSharp::RoadGenerationConfig
+  GridWidth: 8
+  GridHeight: 8
+  MinSegmentLength: 15
+  MaxSegmentLength: 100
+  IntersectionJitter: 0
+  LaneWidth: 3.5
+  StopLineDistance: 4
+  TurnRadius: 5
+  NodeRemovalPercentage: 15
+  RoadRemovalPercentage: 10
+  EnableBridges: 1
+  BridgeHeight: 5
+  MinBridgeRampLength: 15
+  MinDistanceFromIntersection: 20
+  MinBridgeCrossingAngle: 45
+  DiagonalConnectionPercentage: 30
+  RandomSeed: 1485336296
+  FloorHeight: 0

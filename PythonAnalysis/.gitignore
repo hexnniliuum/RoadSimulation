@@ -1,0 +1,42 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# Generated output files
+*.png
+*.jpg
+*.jpeg
+*.pdf
+*.mp4
+*.avi
+
+# Data files (may be large)
+vehicle_positions.csv
+*.csv
+
+# Exported JSON (can be large, regenerate from Unity)
+road_network_export.json
+
+# Generated folders
+time_series/
+heatmaps/
+animation_frames/
+output/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
