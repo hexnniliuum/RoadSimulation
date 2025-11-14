@@ -1,6 +1,6 @@
 # Stage 4: Intersection Logic - Implementation Plan
 
-## OverviewO
+## Overview
 Implement "priority to the right" intersection logic using a data-driven approach. The system will manage vehicle entry/exit from intersections, enforce right-of-way rules, and prevent collisions.
 
 ---
@@ -551,6 +551,227 @@ public CarState CurrentState => currentState;
 public float DistanceAlongPath => distanceAlongPath;
 public PathType CurrentPathType => currentPathType;
 ```
+
+### Problem 7: State Transition Method Conflicts ⚠️ CRITICAL
+**Scenario**: Existing `TransitionToNextPath()` conflicts with new state machine logic
+**Issue**: Multiple critical bugs that could cause cars to stop after crossing intersections
+**Root Causes**:
+1. **Non-existent methods**: Plan references `TransitionToTurnCurve()` and `TransitionToNextLane()` which don't exist
+2. **Existing method unaware of states**: Current `TransitionToNextPath()` doesn't know about `CarState`
+3. **Double turn selection**: Turn is selected twice (once for intersection logic, once during transition)
+4. **Competing transition checks**: Both old and new logic check `distanceAlongPath >= currentLane.Length`
+5. **State reset order**: Intersection data cleared after transition instead of before
+6. **Short lane re-triggering**: Car immediately enters `Approaching` state on short destination lanes
+
+**Consequences**:
+- Car transitions to turn curve but remains in wrong state
+- Car finishes turn but `currentState` never resets to `OnLane`
+- Car picks different turn than what intersection manager approved
+- Car gets stuck in `Crossing` state on new lane, fails subsequent intersection checks
+- Car tries to use `intendedTurn` that was set to `null` prematurely
+
+**Solution**: Refactor transition logic completely
+```csharp
+// REMOVE the existing TransitionToNextPath() method entirely
+// REPLACE with these state-aware methods:
+
+/// <summary>
+/// Transition from lane end to turn curve (entering intersection)
+/// MUST be in Crossing state before calling
+/// </summary>
+private void TransitionToTurnCurve()
+{
+    if (currentState != CarState.Crossing)
+    {
+        Debug.LogError($"Car {CarID}: Attempting to enter intersection without Crossing state!");
+        return;
+    }
+    
+    if (intendedTurn == null)
+    {
+        Debug.LogError($"Car {CarID}: No intended turn selected!");
+        currentSpeed = 0f;
+        return;
+    }
+    
+    // Use the PRE-SELECTED turn, don't pick a new one
+    currentTurnCurve = intendedTurn;
+    currentPathType = PathType.TurnCurve;
+    distanceAlongPath = 0f;
+    
+    // State remains Crossing - don't change it!
+}
+
+/// <summary>
+/// Transition from turn curve to destination lane (exiting intersection)
+/// Handles full state cleanup
+/// </summary>
+private void TransitionToNextLane()
+{
+    // Clean up OLD intersection data FIRST, before changing paths
+    Node oldIntersection = targetIntersection;
+    
+    // Transition to new lane
+    currentLane = currentTurnCurve.ToLane;
+    currentPathType = PathType.Lane;
+    distanceAlongPath = 0f;
+    
+    // NOW clear intersection-related state
+    currentState = CarState.OnLane;
+    targetIntersection = null;
+    intendedTurn = null;
+    currentTurnCurve = null; // Clear reference
+    
+    // Check if new lane is too short - could immediately re-trigger Approaching
+    float distanceToNewEnd = currentLane.Length;
+    if (distanceToNewEnd < INTERSECTION_DETECTION_DISTANCE)
+    {
+        Debug.LogWarning($"Car {CarID}: Transitioned to very short lane {currentLane.ID} (length: {distanceToNewEnd})");
+        // This is OK - the next Update() will handle it naturally
+        // Just log for debugging
+    }
+}
+
+// UPDATE the existing Update() method - REMOVE old transition check:
+void Update()
+{
+    // Calculate target speed
+    float targetSpeed = CalculateTargetSpeed();
+    
+    // Accelerate/brake toward target
+    if (currentSpeed < targetSpeed)
+    {
+        currentSpeed = Mathf.Min(currentSpeed + MaxAcceleration * Time.deltaTime, targetSpeed);
+    }
+    else if (currentSpeed > targetSpeed)
+    {
+        currentSpeed = Mathf.Max(currentSpeed - MaxBraking * Time.deltaTime, targetSpeed);
+    }
+    
+    // Move forward
+    distanceAlongPath += currentSpeed * Time.deltaTime;
+    
+    // State-aware path management
+    if (currentPathType == PathType.Lane)
+    {
+        HandleLaneMovement();
+        // OLD CODE REMOVED: if (distanceAlongPath >= currentLane.Length) { TransitionToNextPath(); }
+    }
+    else // PathType.TurnCurve
+    {
+        HandleIntersectionMovement();
+        // OLD CODE REMOVED: if (distanceAlongPath >= currentTurnCurve.ArcLength) { TransitionToNextPath(); }
+    }
+    
+    // Update transform
+    UpdatePositionAndRotation();
+}
+```
+
+**Additional Safety Checks**:
+```csharp
+// In HandleLaneMovement() - prevent double transitions
+void HandleLaneMovement()
+{
+    // Only do intersection logic if actually on a lane
+    if (currentPathType != PathType.Lane)
+    {
+        Debug.LogError($"Car {CarID}: HandleLaneMovement called but pathType is {currentPathType}!");
+        return;
+    }
+    
+    float distanceToEnd = currentLane.Length - distanceAlongPath;
+    
+    // Transition: OnLane -> Approaching
+    if (distanceToEnd < INTERSECTION_DETECTION_DISTANCE && currentState == CarState.OnLane)
+    {
+        // Verify lane has endpoint
+        if (currentLane.EndNode == null)
+        {
+            Debug.LogError($"Car {CarID}: Lane {currentLane.ID} has no EndNode!");
+            return;
+        }
+        
+        currentState = CarState.Approaching;
+        targetIntersection = currentLane.EndNode;
+        
+        // Pre-select turn (ONLY once!)
+        if (currentLane.AvailableTurns.Count > 0)
+        {
+            intendedTurn = currentLane.AvailableTurns[Random.Range(0, currentLane.AvailableTurns.Count)];
+            Debug.Log($"Car {CarID}: Selected turn from lane {currentLane.ID} to lane {intendedTurn.ToLane.ID}");
+        }
+        else
+        {
+            Debug.LogError($"Car {CarID}: Lane {currentLane.ID} has no available turns!");
+            currentSpeed = 0f;
+            return;
+        }
+        
+        // Register as waiting
+        simulationManager.IntersectionManager.UpdateCarWaitingAt(this, currentLane, targetIntersection);
+    }
+    
+    // ... rest of HandleLaneMovement() ...
+    
+    // Transition to turn curve ONLY when in Crossing state and at lane end
+    if (distanceAlongPath >= currentLane.Length)
+    {
+        if (currentState == CarState.Crossing)
+        {
+            TransitionToTurnCurve();
+        }
+        else
+        {
+            // Shouldn't reach lane end without being in Crossing state
+            Debug.LogWarning($"Car {CarID}: Reached lane end in state {currentState}, clamping position");
+            distanceAlongPath = currentLane.Length - 0.01f;
+            currentSpeed = 0f;
+        }
+    }
+}
+
+// In HandleIntersectionMovement() - verify state
+void HandleIntersectionMovement()
+{
+    // Only do intersection logic if actually on a turn curve
+    if (currentPathType != PathType.TurnCurve)
+    {
+        Debug.LogError($"Car {CarID}: HandleIntersectionMovement called but pathType is {currentPathType}!");
+        return;
+    }
+    
+    // Should be in Crossing state while on turn curve
+    if (currentState != CarState.Crossing)
+    {
+        Debug.LogWarning($"Car {CarID}: On turn curve but state is {currentState}, correcting to Crossing");
+        currentState = CarState.Crossing;
+    }
+    
+    // Exit when turn complete
+    if (distanceAlongPath >= currentTurnCurve.ArcLength)
+    {
+        // Unregister from intersection
+        if (targetIntersection != null)
+        {
+            simulationManager.IntersectionManager.RegisterExit(this, targetIntersection);
+        }
+        else
+        {
+            Debug.LogWarning($"Car {CarID}: Completing turn but targetIntersection is null!");
+        }
+        
+        TransitionToNextLane();
+    }
+}
+```
+
+**Testing for This Bug**:
+- Create a test with 2 lanes connected by a turn
+- Spawn a single car
+- Monitor state transitions in Inspector
+- Verify sequence: OnLane → Approaching → Crossing (on lane) → Crossing (on turn) → OnLane (on new lane)
+- Car should NEVER stop after exiting intersection
 
 ---
 

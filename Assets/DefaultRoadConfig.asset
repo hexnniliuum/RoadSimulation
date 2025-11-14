@@ -16,7 +16,7 @@ MonoBehaviour:
   GridHeight: 8
   MinSegmentLength: 15
   MaxSegmentLength: 100
-  IntersectionJitter: 0
+  IntersectionJitter: 50
   LaneWidth: 3.5
   StopLineDistance: 4
   TurnRadius: 5

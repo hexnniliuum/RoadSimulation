@@ -30,12 +30,23 @@ public class SimulationManager : MonoBehaviour
     private RoadMap roadMap;
     private List<CarController> activeCars = new List<CarController>();
     private int nextCarID = 0;
+    
+    [Header("Intersection Management")]
+    private IntersectionManager intersectionManager;
 
     private void Start()
     {
         if (generateOnStart)
         {
             GenerateRoadNetwork();
+            
+            // Initialize intersection management system
+            if (roadMap != null)
+            {
+                intersectionManager = new IntersectionManager();
+                intersectionManager.Initialize(roadMap);
+                Debug.Log("IntersectionManager initialized");
+            }
             
             if (spawnCarsOnStart && roadMap != null)
             {
@@ -95,6 +106,13 @@ public class SimulationManager : MonoBehaviour
             return;
         }
         
+        // Get intersection detection distance from config
+        float intersectionDetectionDistance = 15f; // Default
+        if (roadGenerator != null && roadGenerator.GetConfig() != null)
+        {
+            intersectionDetectionDistance = roadGenerator.GetConfig().IntersectionDetectionDistance;
+        }
+        
         // Spawn cars with random placement
         int carsSpawned = 0;
         int maxAttempts = numberOfCars * 10; // Prevent infinite loop
@@ -107,8 +125,16 @@ public class SimulationManager : MonoBehaviour
             // Pick random lane
             Lane randomLane = allLanes[Random.Range(0, allLanes.Count)];
             
-            // Pick random position along lane
-            float randomDistance = Random.Range(0f, randomLane.Length);
+            // Calculate safe spawn range (avoid spawning too close to intersection)
+            float maxSpawnDistance = randomLane.Length - intersectionDetectionDistance - 5f;
+            if (maxSpawnDistance < 5f)
+            {
+                // Lane too short, skip
+                continue;
+            }
+            
+            // Pick random position along lane (avoiding intersection zone)
+            float randomDistance = Random.Range(0f, maxSpawnDistance);
             
             // Check if position is too close to other cars
             if (IsPositionTooClose(randomLane, randomDistance))
@@ -186,5 +212,12 @@ public class SimulationManager : MonoBehaviour
     {
         return roadMap;
     }
+    
+    public RoadNetworkGenerator GetRoadGenerator()
+    {
+        return roadGenerator;
+    }
+    
+    public IntersectionManager IntersectionManager => intersectionManager;
 }
 

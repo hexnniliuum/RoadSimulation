@@ -72,6 +72,19 @@ public class RoadGenerationConfig : ScriptableObject
     [Tooltip("Constant Y position for all road elements")]
     public float FloorHeight = 0f;
 
+    [Header("Intersection Logic")]
+    [Tooltip("Distance from lane end to start checking for intersection")]
+    public float IntersectionDetectionDistance = 15f;
+    
+    [Tooltip("Buffer distance before stop line (prevents overshooting)")]
+    public float StopLineBuffer = 0.5f;
+    
+    [Tooltip("Time to wait before forcing entry to break deadlock (seconds)")]
+    public float DeadlockTimeout = 5f;
+    
+    [Tooltip("Threshold distance for turn curve conflict detection")]
+    public float TurnConflictThreshold = 4f;
+
     private void OnValidate()
     {
         // Ensure at least 4 intersections (minimum 2x2 grid)
