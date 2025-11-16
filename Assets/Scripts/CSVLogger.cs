@@ -132,7 +132,7 @@ public class CSVLogger : MonoBehaviour
             Vector3 pos = car.GetPosition();
             
             // Format: vehicle_id,positionX,positionY,positionZ,time
-            writer.WriteLine($"{car.CarID},{pos.x:F3},{pos.y:F3},{pos.z:F3},{currentTime:F3}");
+            writer.WriteLine($"{car.CarID};{pos.x:F3};{pos.y:F3};{pos.z:F3};{currentTime:F3}");
         }
         
         // Flush every N logs to prevent data loss
