@@ -26,6 +26,7 @@ This is a 3D traffic simulation in Unity focused on procedural road network gene
   - Node/road removal percentages for variation
   - Diagonal connection percentage for bridge opportunities
   - Bridge constraints (height, ramp length, minimum angles/distances)
+  - Traffic Light % (0-100): Controls density of traffic lights
   - Random seed for reproducibility
 
 ### Generation System
@@ -1686,6 +1687,190 @@ The simulation now has:
 
 ---
 
+# Stage 5: Traffic Lights
+
+## Overview
+
+Stage 5 introduces a traffic signal system to manage flow at complex intersections. Based on the **Traffic Light %** configuration setting, a percentage of non-trivial intersections (3+ roads) receive traffic lights, which take precedence over the "priority to the right" rule at those locations. The system uses timed phases to allow non-conflicting traffic streams to proceed simultaneously.
+
+## New Files Created
+
+- **`StopLightController.cs`** - Manages light phases and state for a single intersection.
+
+## Core Features
+
+### 1. Percentage-Based Traffic Light Assignment
+- **Traffic Light % (0-100)** in `RoadGenerationConfig` controls density of traffic lights
+- Only non-trivial intersections (3+ connected roads) are candidates
+- Intersections are selected based on:
+  1. **Priority**: Highest connectivity intersections get lights first
+  2. **Deterministic tie-breaking**: Lower Node ID wins when connectivity is equal
+  3. **Count**: `roundToInt(candidateCount × percentage / 100)`
+- Intersections without traffic lights continue using "priority to the right" rule
+- **Visual verification**: Only intersections with actual traffic lights show colored orb indicators
+
+### 2. Phased Signal Control
+- **Green Phase (10s)**: Traffic allowed to flow.
+- **Yellow Phase (3s)**: Warning phase, traffic should stop if safe.
+- **All-Red Interval (2s)**: Safety buffer between changing phases to clear the intersection.
+
+### 3. Intelligent Lane Grouping
+The system automatically analyzes intersection topology to group lanes:
+- Identifies incoming lanes.
+- Pairs opposite lanes (within ~30° of 180°) to run in the same phase.
+- Creates sequential phases for non-compatible lane groups.
+- Ensures no crossing conflicts during a green phase (mostly).
+
+### 4. Integration with Intersection Logic
+- **Priority Override**: Traffic lights take precedence over "priority to the right" at lit intersections.
+- **Mixed Rule System**: Non-lit intersections continue using priority-to-right.
+- **Red Light Enforcement**: Cars stop at the stop line if the light is Red or Yellow.
+- **Yielding**: Even on Green, cars still check for blocked intersections (anti-gridlock).
+
+### 5. Visualization
+- Traffic lights appear as floating spheres above the stop line of each lane.
+- Colors update in real-time (Green/Yellow/Red).
+- **Critical**: Only drawn at intersections that actually have traffic lights (based on percentage).
+- Can be toggled via `RoadNetworkVisualizer` Show Traffic Lights option.
+
+## Unity Editor Setup
+
+### Step 1: Verify Scripts
+Ensure `StopLightController.cs` is in your `Assets/Scripts/` folder.
+
+### Step 2: Configure Traffic Light Density
+1. Select your `RoadGenerationConfig` asset in the Project window
+2. Adjust **Traffic Light %** setting:
+   - **0%**: No traffic lights (all intersections use priority-to-right)
+   - **50%**: Half of eligible intersections get traffic lights
+   - **100%**: All eligible intersections get traffic lights
+3. Press **Play** to generate network with new percentage
+
+### Step 3: Run Simulation
+1. Press **Play**.
+2. Observe intersections - only those with traffic lights show colored orb indicators:
+   - Green orb: Traffic can proceed
+   - Yellow orb: Prepare to stop
+   - Red orb: Must stop
+3. Intersections without orbs continue using priority-to-right logic
+
+### Step 4: Visualization Controls
+Select `SimulationManager` and look at `RoadNetworkVisualizer`:
+- Toggle **Show Traffic Lights** to hide/show the indicators.
+- Adjust **Traffic Light Size** if they are too large/small.
+
+### Step 5: Manual Regeneration (Optional)
+While in Play mode:
+- Right-click `SimulationManager` → **Generate Road Network**
+- Traffic lights will be re-assigned based on current percentage setting
+- Cars must be respawned to see new light assignments
+
+## Technical Implementation Details
+
+### Traffic Light Selection Algorithm
+```csharp
+// 1. Find candidate intersections (3+ roads, not trivial)
+var candidates = roadMap.Nodes
+    .Where(n => !n.IsTrivialIntersection() && n.ConnectedRoads.Count >= 2)
+    .OrderByDescending(n => n.ConnectedRoads.Count)  // Priority: more roads first
+    .ThenBy(n => n.ID)  // Tie-breaker: lower ID first
+    .ToList();
+
+// 2. Calculate how many get lights based on percentage
+float percentage = config.TrafficLightPercentage;  // 0-100
+int count = roundToInt(candidates.Count * (percentage / 100f));
+
+// 3. Assign lights to top N intersections
+for (int i = 0; i < count; i++) {
+    stopLights[candidates[i]] = new StopLightController(candidates[i]);
+}
+```
+
+### StopLightController Logic
+Each intersection has its own controller that updates every frame:
+```csharp
+void Update() {
+    timer += deltaTime;
+    if (timer > duration) {
+       SwitchState(); // Green -> Yellow -> Red -> NextPhase
+    }
+}
+```
+
+### Lane Phase Grouping
+On initialization:
+1. Sorts all incoming lanes by angle.
+2. Picks an unassigned lane.
+3. Finds an opposite lane (dot product < -0.866).
+4. Groups them into a `StopLightPhase`.
+5. Repeats until all lanes are assigned.
+
+### IntersectionManager Integration
+Modified `CanEnter()` method:
+```csharp
+// Check 0: Traffic Lights (Overrides priority rules)
+if (stopLights.ContainsKey(node)) {
+    var state = light.GetLightState(lane);
+    if (state == Red || state == Yellow) return false;
+}
+// If Green, proceed to deadblock/blocking checks...
+
+// Priority-to-right check (ONLY if no traffic light)
+if (!stopLights.ContainsKey(node)) {
+    if (HasPriorityVehicleOnRight(...)) return false;
+}
+```
+
+### HasTrafficLight() Method
+```csharp
+// New method to check if intersection has traffic light
+public bool HasTrafficLight(Node intersection) {
+    return stopLights.ContainsKey(intersection);
+}
+```
+
+### Visualization Filtering
+Only draws traffic light orbs for intersections that have actual controllers:
+```csharp
+private void DrawTrafficLights() {
+    foreach (Node node in roadMap.Nodes) {
+        // Only draw for intersections that ACTUALLY have traffic lights
+        if (!simulationManager.IntersectionManager.HasTrafficLight(node)) continue;
+        
+        // Draw orb indicators...
+    }
+}
+```
+
+## Configuration Examples
+
+### Example 1: Light Traffic (25%)
+- 4×4 grid with 10 non-trivial intersections
+- 10 × 0.25 = 2.5 → rounded to 3 intersections get lights
+- Lights assigned to 3 most connected intersections
+- 7 intersections use priority-to-right
+
+### Example 2: Heavy Traffic (100%)
+- Same 4×4 grid
+- All 10 non-trivial intersections get traffic lights
+- Complete signalized network
+- No priority-to-right anywhere
+
+### Example 3: No Signals (0%)
+- Same 4×4 grid
+- 0 intersections get lights
+- All intersections use priority-to-right
+- No orb indicators visible
+
+## Known Limitations
+- Fixed timing (no sensor-based actuation yet)
+- Left turns on green yield logic is implicit via the conflict system
+- No separate left-turn phases (protected lefts)
+- Percentage-based assignment may not distribute evenly across network
+- Traffic light positions not optimized for traffic flow patterns
+
+---
+
 ## File Dependencies
 
 ```
@@ -1708,8 +1893,8 @@ All scripts must be in `Assets/Scripts/` folder for proper compilation.
 
 ---
 
-**Project Status**: All 4 Core Stages Complete ✅  
-**Last Updated**: Stage 1, 2, 3, 4 - Full Traffic Simulation with Intersection Logic  
+**Project Status**: All 5 Core Stages Complete ✅  
+**Last Updated**: Stage 1, 2, 3, 4, 5 - Full Traffic Simulation with Intersection Logic & Traffic Lights  
 **Unity Version**: 2021.3+ (should work with most versions)  
 **Coordinate System**: Right-handed, Y-up, XZ floor plane, right-side driving  
-**Traffic Rules**: Priority-to-right, physics-based braking, deadlock resolution
+**Traffic Rules**: Priority-to-right, physics-based braking, deadlock resolution, traffic lights
