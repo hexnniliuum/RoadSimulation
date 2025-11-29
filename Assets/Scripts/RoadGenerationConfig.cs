@@ -73,6 +73,10 @@ public class RoadGenerationConfig : ScriptableObject
     public float FloorHeight = 0f;
 
     [Header("Intersection Logic")]
+    [Tooltip("Percentage of eligible intersections (3+ roads) to have traffic lights (0-100%)")]
+    [Range(0f, 100f)]
+    public float TrafficLightPercentage = 100f;
+
     [Tooltip("Distance from lane end to start checking for intersection")]
     public float IntersectionDetectionDistance = 25f;
     

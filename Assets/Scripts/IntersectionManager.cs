@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using UnityEngine;
+using System.Linq;
 
 /// <summary>
 /// Manages intersection states, turn conflicts, and right-of-way rules.
@@ -9,6 +10,9 @@ public class IntersectionManager
 {
     // State tracking per node
     private Dictionary<Node, IntersectionState> intersectionStates;
+    
+    // Traffic lights
+    private Dictionary<Node, StopLightController> stopLights;
     
     // Pre-computed conflict map: which turn curves intersect
     private Dictionary<TurnCurve, HashSet<TurnCurve>> turnConflicts;
@@ -22,9 +26,10 @@ public class IntersectionManager
     /// <summary>
     /// Initialize intersection management system with road network.
     /// </summary>
-    public void Initialize(RoadMap roadMap)
+    public void Initialize(RoadMap roadMap, RoadGenerationConfig config)
     {
         intersectionStates = new Dictionary<Node, IntersectionState>();
+        stopLights = new Dictionary<Node, StopLightController>();
         turnConflicts = new Dictionary<TurnCurve, HashSet<TurnCurve>>();
         carBreakingDeadlock = new Dictionary<Node, CarController>();
         
@@ -38,15 +43,43 @@ public class IntersectionManager
                 IntersectionState state = new IntersectionState(node);
                 intersectionStates[node] = state;
                 carBreakingDeadlock[node] = null; // Initialize with no breaker
-                
-                // Debug.Log($"Intersection created at Node {node.ID} with {node.ConnectedRoads.Count} roads");
             }
+        }
+
+        // Determine which nodes get traffic lights based on configuration
+        // Candidates: Non-trivial intersections (more than 2 roads)
+        var candidateNodes = roadMap.Nodes
+            .Where(n => !n.IsTrivialIntersection() && n.ConnectedRoads.Count >= 2)
+            .OrderByDescending(n => n.ConnectedRoads.Count) // Prioritize highest connectivity
+            .ThenBy(n => n.ID) // Deterministic tie-breaking
+            .ToList();
+
+        // Calculate count based on percentage (0-100)
+        float percentage = Mathf.Clamp(config.TrafficLightPercentage, 0f, 100f);
+        int targetCount = Mathf.RoundToInt(candidateNodes.Count * (percentage / 100f));
+        
+        // Create stop lights for the top N nodes
+        for (int i = 0; i < targetCount; i++)
+        {
+            Node node = candidateNodes[i];
+            stopLights[node] = new StopLightController(node);
         }
         
         // Pre-compute turn curve conflicts
         BuildTurnConflictMap();
         
-        Debug.Log($"[IntersectionManager] Initialized {intersectionStates.Count} intersections, {turnConflicts.Count} turn curves analyzed");
+        Debug.Log($"[IntersectionManager] Initialized {intersectionStates.Count} intersections. Traffic Lights: {stopLights.Count}/{candidateNodes.Count} ({percentage:F0}%)");
+    }
+    
+    /// <summary>
+    /// Update traffic lights.
+    /// </summary>
+    public void Update(float deltaTime)
+    {
+        foreach (var light in stopLights.Values)
+        {
+            light.Update(deltaTime);
+        }
     }
     
     /// <summary>
@@ -61,6 +94,23 @@ public class IntersectionManager
         }
         
         var state = intersectionStates[intersection];
+        
+        // Check 0: Traffic Lights (Overrides everything else)
+        if (stopLights.ContainsKey(intersection))
+        {
+            var lightState = stopLights[intersection].GetLightState(fromLane);
+            if (lightState == StopLightController.LightState.Red)
+            {
+                return false; // Stop on Red
+            }
+            if (lightState == StopLightController.LightState.Yellow)
+            {
+                // For simplicity, treat Yellow as Red (stop if you can)
+                // In a real sim, we'd check distance, but here we want to clear the intersection
+                return false; 
+            }
+            // Green light: Proceed to other checks (still need to check for blocked intersection)
+        }
         
         // Check 1: Must be first in queue for this lane
         if (state.waitingQueues.ContainsKey(fromLane))
@@ -102,15 +152,40 @@ public class IntersectionManager
             }
         }
         
-        // Check 4: Priority to right
-        if (HasPriorityVehicleOnRight(car, fromLane, intersection, out int blockingCarID))
+        // Check 4: Priority to right (ONLY if no traffic lights)
+        // If there are traffic lights, they handle priority phases
+        if (!stopLights.ContainsKey(intersection))
         {
-            // if (intersection.ID == 7)
-            //     Debug.Log($"[NODE-7] Car {car.CarID}: BLOCKED by priority-to-right (Car {blockingCarID})");
-            return false; // Vehicle on right has priority
+            if (HasPriorityVehicleOnRight(car, fromLane, intersection, out int blockingCarID))
+            {
+                // if (intersection.ID == 7)
+                //     Debug.Log($"[NODE-7] Car {car.CarID}: BLOCKED by priority-to-right (Car {blockingCarID})");
+                return false; // Vehicle on right has priority
+            }
         }
         
         return true;
+    }
+    
+    /// <summary>
+    /// Get the current light state for a specific lane at an intersection.
+    /// Returns Green if no light exists.
+    /// </summary>
+    public StopLightController.LightState GetLightState(Node intersection, Lane lane)
+    {
+        if (stopLights.ContainsKey(intersection))
+        {
+            return stopLights[intersection].GetLightState(lane);
+        }
+        return StopLightController.LightState.Green;
+    }
+    
+    /// <summary>
+    /// Check if a node has a traffic light controller.
+    /// </summary>
+    public bool HasTrafficLight(Node intersection)
+    {
+        return stopLights.ContainsKey(intersection);
     }
     
     /// <summary>
@@ -646,4 +721,3 @@ public class IntersectionState
         waitStartTimes.Remove(car);
     }
 }
-

@@ -44,7 +44,7 @@ public class SimulationManager : MonoBehaviour
             if (roadMap != null)
             {
                 intersectionManager = new IntersectionManager();
-                intersectionManager.Initialize(roadMap);
+                intersectionManager.Initialize(roadMap, roadGenerator.GetConfig());
                 Debug.Log("IntersectionManager initialized");
             }
             
@@ -52,6 +52,14 @@ public class SimulationManager : MonoBehaviour
             {
                 SpawnCars();
             }
+        }
+    }
+
+    private void Update()
+    {
+        if (intersectionManager != null)
+        {
+            intersectionManager.Update(Time.deltaTime);
         }
     }
 
@@ -220,4 +228,3 @@ public class SimulationManager : MonoBehaviour
     
     public IntersectionManager IntersectionManager => intersectionManager;
 }
-

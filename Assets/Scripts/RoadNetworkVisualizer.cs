@@ -11,6 +11,7 @@ public class RoadNetworkVisualizer : MonoBehaviour
     [SerializeField] private bool showRoads = true;
     [SerializeField] private bool showLanes = true;
     [SerializeField] private bool showTurnCurves = true;
+    [SerializeField] private bool showTrafficLights = true;
     [SerializeField] private bool showMetrics = true;
     
     [Header("Colors")]
@@ -21,19 +22,25 @@ public class RoadNetworkVisualizer : MonoBehaviour
     
     [Header("Sizes")]
     [SerializeField] private float nodeSize = 1f;
+    [SerializeField] private float trafficLightSize = 1.5f;
 
     private RoadNetworkGenerator generator;
+    private SimulationManager simulationManager;
     private RoadMap roadMap;
 
     private void Start()
     {
         generator = GetComponent<RoadNetworkGenerator>();
+        simulationManager = GetComponent<SimulationManager>();
     }
 
     private void OnDrawGizmos()
     {
         if (generator == null)
             generator = GetComponent<RoadNetworkGenerator>();
+            
+        if (simulationManager == null)
+            simulationManager = GetComponent<SimulationManager>();
         
         roadMap = generator?.GetRoadMap();
         
@@ -51,6 +58,9 @@ public class RoadNetworkVisualizer : MonoBehaviour
         
         if (showTurnCurves)
             DrawTurnCurves();
+            
+        if (showTrafficLights)
+            DrawTrafficLights();
     }
 
     private void DrawNodes()
@@ -186,6 +196,46 @@ public class RoadNetworkVisualizer : MonoBehaviour
             }
         }
     }
+    
+    private void DrawTrafficLights()
+    {
+        if (simulationManager == null || simulationManager.IntersectionManager == null)
+            return;
+            
+        foreach (Node node in roadMap.Nodes)
+        {
+            // Only draw for intersections that actually have traffic lights
+            if (!simulationManager.IntersectionManager.HasTrafficLight(node)) continue;
+            
+            foreach (Road road in node.ConnectedRoads)
+            {
+                // Check lanes ending at this node
+                CheckAndDrawLight(node, road.ForwardLane);
+                CheckAndDrawLight(node, road.BackwardLane);
+            }
+        }
+    }
+    
+    private void CheckAndDrawLight(Node intersection, Lane lane)
+    {
+        if (lane.EndNode != intersection) return;
+        
+        var lightState = simulationManager.IntersectionManager.GetLightState(intersection, lane);
+        
+        Color lightColor = Color.green;
+        switch (lightState)
+        {
+            case StopLightController.LightState.Green: lightColor = Color.green; break;
+            case StopLightController.LightState.Yellow: lightColor = Color.yellow; break;
+            case StopLightController.LightState.Red: lightColor = Color.red; break;
+        }
+        
+        Gizmos.color = lightColor;
+        
+        // Draw sphere at end of lane (slightly elevated)
+        Vector3 pos = lane.EndPosition + Vector3.up * 2f;
+        Gizmos.DrawSphere(pos, trafficLightSize);
+    }
 
     private void DrawArrow(Vector3 start, Vector3 end, float arrowHeadLength)
     {
@@ -207,4 +257,3 @@ public class RoadNetworkVisualizer : MonoBehaviour
         roadMap = generator?.GetRoadMap();
     }
 }
-
