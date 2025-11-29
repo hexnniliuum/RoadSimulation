@@ -646,18 +646,26 @@ Stage 2 adds vehicle simulation to the road network. Cars spawn at random positi
 - Follow lane using `Lane.GetPositionAtDistance()` (includes bridge elevation)
 - When reaching lane end, pick random turn from `AvailableTurns`
 - Follow turn curve using quadratic Bézier interpolation
-- Transition to destination lane after turn
+- Transition to destination lane after turn with **safe entry check**
+  - Before entering a new lane, checks for cars already on it
+  - Adjusts start position to behind existing cars if needed
+  - Matches speed of car ahead to prevent rear-end collisions
 - Repeat indefinitely
 
 **Speed Control:**
 - Accelerate toward target speed (configurable)
-- Smooth acceleration/deceleration (no instant changes)
+- **Physics-Based Braking**:
+  - Uses kinematic equations to calculate precise stopping distances
+  - **Gradual Braking**: Starts braking earlier using `SafeFollowDistance`
+  - **Smooth Deceleration**: Added intermediate braking zones to prevent sudden stops
+  - **Approach Slowdown**: Automatically slows to 85% speed when approaching traffic lights (even green)
 - Speed adjusts based on obstacles ahead
 
 **Collision Avoidance:**
 - Each frame, check for cars ahead on same path
 - Within Look Ahead Distance: gradually match speed
-- Within Safe Follow Distance: brake aggressively
+- Within Safe Follow Distance: brake progressively
+- Emergency braking only at very close range (< 0.3 units)
 - Simple O(N²) check (acceptable for <100 cars)
 
 **Turn Selection:**
@@ -675,7 +683,7 @@ Stage 2 adds vehicle simulation to the road network. Cars spawn at random positi
 | Max Acceleration | 5 | Speed-up rate (units/second²) |
 | Max Braking | 10 | Slow-down rate (units/second²) |
 | Look Ahead Distance | 15 | Obstacle detection range |
-| Safe Follow Distance | 5 | Minimum gap to car ahead |
+| Safe Follow Distance | 10 | Minimum gap to car ahead |
 
 **Tips:**
 - Higher Target Speed = faster traffic
@@ -1214,7 +1222,9 @@ Cars now have distinct behavioral states:
 Classic European traffic rule enforced at all intersections:
 - Cars must yield to vehicles approaching from their right
 - Uses cross product to determine spatial relationship (clockwise = right)
-- Only checks first car in each queue (not entire queue)
+- **Refined Logic**: Only checks cars that are **actually at the stop line** (`WaitingToEnter` state)
+  - Prevents yielding to cars far away (approaching)
+  - Improves traffic flow efficiency
 - Prevents gridlock at multi-way intersections
 
 ### 3. Deadlock Detection & Resolution
@@ -1250,9 +1260,10 @@ Classic European traffic rule enforced at all intersections:
 
 **Intelligent Queue Detection:**
 - Cars detect queues at intersections from 37.5 units away
+- **Queue Check Refinement**: Now only checks for queues on the **specific lane** the car is traversing
+  - Prevents unnecessary braking for non-conflicting queues at the same intersection
 - Pre-emptively slow down to 70% speed when queue detected
 - Detect other cars converging on same intersection (30-unit radius)
-- Only applies if NO car ahead on same lane (car-following takes priority)
 
 **Queue Spacing:**
 - Cars maintain EXACTLY `MinimumCarBuffer` (default: 1 unit) between each other
@@ -1353,18 +1364,23 @@ public float TurnConflictThreshold = 4f;           // Distance for turn overlap 
 
 ```
 For car requesting entry:
-  1. Check deadlock timeout (intersection-level)
+  1. Check traffic lights (if present)
+     └─ IF Red/Yellow: DENY ENTRY
+  
+  2. Check deadlock timeout (intersection-level)
      └─ IF this car is designated deadlock breaker: ALLOW ENTRY
   
-  2. Check path conflicts
+  3. Check path conflicts
      └─ FOR each car currently in intersection:
         └─ IF intended turn overlaps with active turn: DENY ENTRY
+     └─ FOR each car granted entry THIS FRAME:
+        └─ IF intended turn overlaps with granted turn: DENY ENTRY
   
-  3. Check priority-to-right
+  4. Check priority-to-right (if no traffic light)
      └─ FOR each incoming lane at intersection:
-        └─ IF lane is to our right AND has waiting cars: DENY ENTRY
+        └─ IF lane is to our right AND has WaitingToEnter cars: DENY ENTRY
   
-  4. All checks passed: ALLOW ENTRY
+  5. All checks passed: ALLOW ENTRY
 ```
 
 ### Deadlock Detection Algorithm
@@ -1726,6 +1742,8 @@ The system automatically analyzes intersection topology to group lanes:
 - **Mixed Rule System**: Non-lit intersections continue using priority-to-right.
 - **Red Light Enforcement**: Cars stop at the stop line if the light is Red or Yellow.
 - **Yielding**: Even on Green, cars still check for blocked intersections (anti-gridlock).
+- **Approach Slowdown**: Cars approaching a traffic light (even on Green) reduce speed to 85% to be prepared for sudden Yellow lights.
+- **Yellow Light Handling**: Cars on Yellow light calculate if they can stop safely; if too close, they proceed; otherwise, they brake.
 
 ### 5. Visualization
 - Traffic lights appear as floating spheres above the stop line of each lane.
@@ -1897,4 +1915,4 @@ All scripts must be in `Assets/Scripts/` folder for proper compilation.
 **Last Updated**: Stage 1, 2, 3, 4, 5 - Full Traffic Simulation with Intersection Logic & Traffic Lights  
 **Unity Version**: 2021.3+ (should work with most versions)  
 **Coordinate System**: Right-handed, Y-up, XZ floor plane, right-side driving  
-**Traffic Rules**: Priority-to-right, physics-based braking, deadlock resolution, traffic lights
+**Traffic Rules**: Priority-to-right, physics-based braking, deadlock resolution, traffic lights, safe lane transition

@@ -30,6 +30,7 @@ MonoBehaviour:
   DiagonalConnectionPercentage: 30
   RandomSeed: 0
   FloorHeight: 0
+  TrafficLightPercentage: 33.8
   IntersectionDetectionDistance: 25
   StopLineBuffer: 0.5
   DeadlockTimeout: 5

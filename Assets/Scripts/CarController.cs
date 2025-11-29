@@ -192,21 +192,26 @@ public class CarController : MonoBehaviour
             // Target gap: maintain EXACTLY MinimumCarBuffer (not a minimum, but THE spacing)
             float targetGap = MinimumCarBuffer;
             
-            // CRITICAL BRAKING ZONE - gradual deceleration to prevent sudden stops
-            float criticalZone = targetGap * 2.0f; // Start braking at 2x the target gap
+            // CRITICAL BRAKING ZONE - use SafeFollowDistance for gradual braking
+            // This prevents sudden stops by starting braking much earlier
+            float criticalZone = Mathf.Max(SafeFollowDistance * 0.6f, targetGap * 4f);
             
             if (gapBetweenBumpers < targetGap * 0.3f)
             {
                 // Truly emergency - return 0 immediately
                 return 0f;
             }
+            else if (gapBetweenBumpers < targetGap)
+            {
+                // Very close - gradual stop
+                float brakingFactor = Mathf.Clamp01(gapBetweenBumpers / targetGap);
+                return Mathf.Lerp(0f, 2f, brakingFactor); // Creep speed at most
+            }
             else if (gapBetweenBumpers < criticalZone)
             {
-                // Gradual braking zone: speed proportional to gap
-                // At targetGap, speed = TargetSpeed * 0.3 (slow but not stopped)
-                // At targetGap * 0.3, speed = 0 (emergency)
-                float brakingFactor = Mathf.Clamp01((gapBetweenBumpers - targetGap * 0.3f) / (criticalZone - targetGap * 0.3f));
-                return Mathf.Lerp(0f, TargetSpeed * 0.5f, brakingFactor);
+                // Gradual braking zone: smooth speed reduction
+                float brakingFactor = Mathf.Clamp01((gapBetweenBumpers - targetGap) / (criticalZone - targetGap));
+                return Mathf.Lerp(2f, TargetSpeed * 0.7f, brakingFactor);
             }
             
             // Check if car ahead is stopped or very slow
@@ -271,110 +276,150 @@ public class CarController : MonoBehaviour
             return 0f; // Must stop at intersection
         }
         
-        // PRE-APPROACH: If on lane and getting close to intersection, check for queues
-        // IMPORTANT: Only apply this if there's NO car ahead on the same lane
-        // If there's a car ahead, the car-following logic above handles all speed adjustments
-        // SKIP for trivial intersections (only 2 roads) - no collision possible
+        // TRAFFIC LIGHT APPROACH: Slow down when approaching traffic light intersections
+        // This prevents sudden braking when light turns yellow
         if (currentState == CarState.OnLane && currentPathType == PathType.Lane && carAhead == null)
         {
             float distanceToEnd = currentLane.Length - distanceAlongPath;
-            float preApproachDistance = INTERSECTION_DETECTION_DISTANCE * 1.5f; // 37.5 units
             
-            if (distanceToEnd < preApproachDistance && currentLane.EndNode != null && !currentLane.EndNode.IsTrivialIntersection())
+            if (distanceToEnd < INTERSECTION_DETECTION_DISTANCE * 1.5f && currentLane.EndNode != null &&
+                !currentLane.EndNode.IsTrivialIntersection())
             {
-                // Check if there are cars queued at the upcoming intersection
-                bool hasQueue = simulationManager.IntersectionManager.HasWaitingCars(currentLane.EndNode);
-                
-                // Check if there are other cars approaching the same intersection (30 unit radius)
-                bool hasApproaching = simulationManager.IntersectionManager.HasApproachingCars(
-                    currentLane.EndNode, this, 30f);
-                
-                if (hasQueue || hasApproaching)
+                // Check if this intersection has traffic lights
+                if (simulationManager.IntersectionManager.HasTrafficLight(currentLane.EndNode))
                 {
-                    // There's congestion (queue or multiple cars converging) - slow down preemptively
-                    // From full speed at 37.5 units to 70% speed at 25 units
-                    float speedReduction = Mathf.Clamp01((preApproachDistance - distanceToEnd) / (preApproachDistance - INTERSECTION_DETECTION_DISTANCE));
-                    float preApproachSpeed = Mathf.Lerp(TargetSpeed, TargetSpeed * 0.7f, speedReduction);
+                    var lightState = simulationManager.IntersectionManager.GetLightState(currentLane.EndNode, currentLane);
                     
-                    return preApproachSpeed;
+                    if (lightState == StopLightController.LightState.Yellow)
+                    {
+                        // Yellow light - brake to stop
+                        float stoppingDistance = (currentSpeed * currentSpeed) / (2f * MaxBraking);
+                        
+                        if (distanceToEnd < stoppingDistance * 1.2f)
+                        {
+                            // Can't stop in time safely - continue through
+                            return TargetSpeed;
+                        }
+                        else
+                        {
+                            // Can stop - decelerate smoothly
+                            float targetArrivalSpeed = 2f;
+                            float idealSpeed = Mathf.Sqrt(targetArrivalSpeed * targetArrivalSpeed +
+                                                          2f * MaxBraking * 0.7f * distanceToEnd);
+                            return Mathf.Min(idealSpeed, TargetSpeed * 0.8f);
+                        }
+                    }
+                    else if (lightState == StopLightController.LightState.Green)
+                    {
+                        // Green light - approach at reduced speed (80%) to allow for yellow
+                        float approachSpeed = TargetSpeed * 0.85f;
+                        return approachSpeed;
+                    }
                 }
             }
         }
         
         // Approaching intersection - check if we need to brake for blocked intersection
         // Skip for trivial intersections (2 roads) - they should never have this state anyway
-        if (currentState == CarState.Approaching && targetIntersection != null && intendedTurn != null && 
+        if (currentState == CarState.Approaching && targetIntersection != null && intendedTurn != null &&
             !targetIntersection.IsTrivialIntersection())
         {
             float distanceToStopLine = currentLane.Length - distanceAlongPath;
             
-            // Check if there's already a queue at this intersection
-            bool hasQueue = simulationManager.IntersectionManager.HasWaitingCars(targetIntersection);
-            
-            // If there's a queue, we should join it without checking CanEnter
-            // Otherwise, check if we can enter the intersection
-            bool shouldBrake = false;
-            
-            if (hasQueue)
+            // Check traffic light state first
+            bool hasTrafficLight = simulationManager.IntersectionManager.HasTrafficLight(targetIntersection);
+            if (hasTrafficLight)
             {
-                // There's a queue - we need to brake to join it
-                shouldBrake = true;
-            }
-            else
-            {
-                // No queue - check if intersection is clear
-                bool canEnter = simulationManager.IntersectionManager.CanEnter(
-                    this, currentLane, intendedTurn, targetIntersection
-                );
+                var lightState = simulationManager.IntersectionManager.GetLightState(targetIntersection, currentLane);
                 
-                shouldBrake = !canEnter;
+                if (lightState == StopLightController.LightState.Red)
+                {
+                    // Red light - must stop
+                    return CalculateBrakingSpeed(distanceToStopLine);
+                }
+                else if (lightState == StopLightController.LightState.Yellow)
+                {
+                    // Yellow light - check if we can stop safely
+                    float stoppingDistance = (currentSpeed * currentSpeed) / (2f * MaxBraking);
+                    
+                    if (distanceToStopLine > stoppingDistance * 0.8f)
+                    {
+                        // Can stop safely - brake
+                        return CalculateBrakingSpeed(distanceToStopLine);
+                    }
+                    else
+                    {
+                        // Too close to stop - continue through at current speed
+                        return currentSpeed;
+                    }
+                }
+                // Green light - continue to standard logic below
             }
+            
+            // Check if there's a queue on OUR lane specifically (not just any queue at intersection)
+            bool hasQueueOnOurLane = simulationManager.IntersectionManager.HasWaitingCarsOnLane(currentLane, targetIntersection);
+            
+            // Check if we can enter the intersection (considers conflicts and priority)
+            bool canEnter = simulationManager.IntersectionManager.CanEnter(
+                this, currentLane, intendedTurn, targetIntersection
+            );
+            
+            // Only brake if we can't enter AND we're getting close to the stop line
+            // OR if there's a queue on our specific lane
+            bool shouldBrake = hasQueueOnOurLane || (!canEnter && distanceToStopLine < INTERSECTION_DETECTION_DISTANCE);
             
             if (shouldBrake)
             {
-                // Intersection blocked - use PHYSICS-BASED braking
-                
-                // Calculate minimum stopping distance given current speed and max braking
-                // Using: v² = u² + 2as → s = v²/(2a)
-                float stoppingDistance = (currentSpeed * currentSpeed) / (2f * MaxBraking);
-                
-                // Add safety margin
-                float safeStoppingDistance = stoppingDistance * 1.2f;
-                
-                if (distanceToStopLine <= STOP_LINE_BUFFER)
-                {
-                    // At stop line - full stop
-                    return 0f;
-                }
-                else if (distanceToStopLine < safeStoppingDistance)
-                {
-                    // URGENT: Not enough distance to stop comfortably
-                    // Calculate maximum safe speed we can achieve with smooth braking
-                    // v = sqrt(2 * a * s)
-                    float maxSafeSpeed = Mathf.Sqrt(2f * MaxBraking * 0.7f * distanceToStopLine);
-                    
-                    return Mathf.Max(maxSafeSpeed, 0f);
-                }
-                else
-                {
-                    // Comfortable braking zone - decelerate smoothly to arrive at stop line at low speed
-                    // Target: arrive with ~2 m/s so we can stop gently
-                    float targetArrivalSpeed = 2f;
-                    float distanceForDeceleration = distanceToStopLine - STOP_LINE_BUFFER;
-                    
-                    // Calculate ideal speed for smooth deceleration: v = sqrt(v_f² + 2as)
-                    float idealSpeed = Mathf.Sqrt(targetArrivalSpeed * targetArrivalSpeed + 
-                                                  2f * MaxBraking * 0.5f * distanceForDeceleration);
-                    
-                    return Mathf.Min(idealSpeed, TargetSpeed);
-                }
+                return CalculateBrakingSpeed(distanceToStopLine);
             }
             
-            // No queue and intersection is clear - maintain normal approach speed
+            // Intersection is clear - maintain approach speed (slightly reduced for safety)
             return TargetSpeed * 0.95f;
         }
         
         return TargetSpeed;
+    }
+    
+    /// <summary>
+    /// Calculate appropriate braking speed for a given distance to stop line.
+    /// Uses physics-based calculations for smooth deceleration.
+    /// </summary>
+    private float CalculateBrakingSpeed(float distanceToStopLine)
+    {
+        // Calculate minimum stopping distance given current speed and max braking
+        // Using: v² = u² + 2as → s = v²/(2a)
+        float stoppingDistance = (currentSpeed * currentSpeed) / (2f * MaxBraking);
+        
+        // Add safety margin
+        float safeStoppingDistance = stoppingDistance * 1.3f;
+        
+        if (distanceToStopLine <= STOP_LINE_BUFFER)
+        {
+            // At stop line - full stop
+            return 0f;
+        }
+        else if (distanceToStopLine < safeStoppingDistance)
+        {
+            // URGENT: Not enough distance to stop comfortably
+            // Calculate maximum safe speed we can achieve with smooth braking
+            // v = sqrt(2 * a * s)
+            float maxSafeSpeed = Mathf.Sqrt(2f * MaxBraking * 0.8f * distanceToStopLine);
+            
+            return Mathf.Max(maxSafeSpeed, 0f);
+        }
+        else
+        {
+            // Comfortable braking zone - decelerate smoothly to arrive at stop line at low speed
+            // Target: arrive with ~3 m/s so we can stop gently
+            float targetArrivalSpeed = 3f;
+            float distanceForDeceleration = distanceToStopLine - STOP_LINE_BUFFER;
+            
+            // Calculate ideal speed for smooth deceleration: v = sqrt(v_f² + 2as)
+            float idealSpeed = Mathf.Sqrt(targetArrivalSpeed * targetArrivalSpeed +
+                                          2f * MaxBraking * 0.6f * distanceForDeceleration);
+            
+            return Mathf.Min(idealSpeed, TargetSpeed);
+        }
     }
     
     /// <summary>
@@ -687,14 +732,20 @@ public class CarController : MonoBehaviour
     
     /// <summary>
     /// Transition from turn curve to destination lane (exiting intersection).
-    /// Handles full state cleanup.
+    /// Handles full state cleanup and checks for cars already on destination lane.
     /// </summary>
     private void TransitionToNextLane()
     {
+        // Get destination lane
+        Lane destinationLane = currentTurnCurve.ToLane;
+        
+        // Check for cars already on the destination lane and find safe starting position
+        float safeStartDistance = FindSafeStartPositionOnLane(destinationLane);
+        
         // Transition to new lane
-        currentLane = currentTurnCurve.ToLane;
+        currentLane = destinationLane;
         currentPathType = PathType.Lane;
-        distanceAlongPath = 0f;
+        distanceAlongPath = safeStartDistance;
         
         // NOW clear intersection-related state
         currentState = CarState.OnLane;
@@ -711,6 +762,48 @@ public class CarController : MonoBehaviour
             // Debug.LogWarning($"Car {CarID}: Transitioned to very short lane {currentLane.ID} (length: {distanceToNewEnd})");
             // This is OK - the next Update() will handle it naturally
         }
+    }
+    
+    /// <summary>
+    /// Find a safe starting position on a lane, accounting for any cars already on it.
+    /// Returns 0 if lane is clear, or a position behind the first car if occupied.
+    /// </summary>
+    private float FindSafeStartPositionOnLane(Lane lane)
+    {
+        var allCars = simulationManager.GetAllCars();
+        float closestCarDistance = float.MaxValue;
+        CarController closestCar = null;
+        
+        foreach (var car in allCars)
+        {
+            if (car == this || car == null)
+                continue;
+            
+            // Check if car is on the destination lane
+            if (car.currentPathType == PathType.Lane && car.currentLane == lane)
+            {
+                if (car.distanceAlongPath < closestCarDistance)
+                {
+                    closestCarDistance = car.distanceAlongPath;
+                    closestCar = car;
+                }
+            }
+        }
+        
+        if (closestCar != null && closestCarDistance < SafeFollowDistance)
+        {
+            // There's a car close to the start of the lane
+            // Calculate safe position behind them
+            float requiredGap = (CarLength * 0.5f) + (closestCar.CarLength * 0.5f) + MinimumCarBuffer;
+            float safePosition = Mathf.Max(0f, closestCarDistance - requiredGap - CarLength);
+            
+            // Also reduce speed to prevent collision
+            currentSpeed = Mathf.Min(currentSpeed, closestCar.CurrentSpeed);
+            
+            return safePosition;
+        }
+        
+        return 0f; // Lane is clear, start at beginning
     }
     
     /// <summary>
