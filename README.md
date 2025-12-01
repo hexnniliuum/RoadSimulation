@@ -61,7 +61,7 @@ The system exports vehicle data to `vehicle_positions.csv` in the project root.
 vehicle_id, positionX, positionY, positionZ, time
 ```
 
-**Note**: This repository generates raw data only. No internal analysis tools are included; consumers must parse the CSV/JSON output externally.
+**Note**: This repository generates raw data only. No internal analysis tools are included; must parse the CSV/JSON output externally.
 
 ## Interaction & Usage
 
@@ -85,4 +85,4 @@ vehicle_id, positionX, positionY, positionZ, time
 
 ## License
 
-[Insert License Here]
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
