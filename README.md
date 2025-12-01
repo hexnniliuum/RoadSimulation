@@ -48,7 +48,7 @@ Configuration is managed via the `RoadGenerationConfig` ScriptableObject.
 | :--- | :--- | :--- |
 | **Grid Dimensions** | 4x4 | Width/Height of the node grid. |
 | **Segment Length** | 50-100 | Range for road segment lengths. |
-| **Intersection Jitter** | 0.3 | Node displacement factor (0.0-1.0). |
+| **Intersection Jitter** | 20 | Node displacement factor. |
 | **Traffic Light %** | 50% | Percentage of eligible intersections to signalize. |
 | **Deadlock Timeout** | 3.0s | Time threshold for forced entry during gridlock. |
 
@@ -73,7 +73,7 @@ vehicle_id, positionX, positionY, positionZ, time
 
 *   **Braking Instability**: Sporadic sudden braking events may occur due to physics calculation edge cases.
 *   **Priority Logic**: Signalized intersections may exhibit suboptimal yielding behavior under heavy load.
-*   **Topology Generation**: High jitter values (>0.5) can result in lane overlaps or generation failures.
+*   **Topology Generation**: High jitter values can result in lane overlaps or generation failures.
 *   **Bridge Geometry**: Multi-segment bridges do not currently maintain a continuous smooth curve.
 
 ## Limitations
