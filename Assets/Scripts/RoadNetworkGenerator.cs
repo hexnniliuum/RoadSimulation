@@ -215,7 +215,8 @@ public class RoadNetworkGenerator : MonoBehaviour
     
     private List<RoadConnection> AddDiagonalConnections(List<RoadConnection> connections, List<RoadConnection> tempConnections, ref int roadId, Node[,] grid)
     {
-        // Try to add some diagonal/shortcut connections that can create crossings
+        const float MIN_ANGLE_DEGREES = 20f;
+        
         int potentialDiagonals = config.GridWidth * config.GridHeight;
         int diagonalsToAdd = Mathf.RoundToInt(potentialDiagonals * config.DiagonalConnectionPercentage / 100f);
         
@@ -224,7 +225,6 @@ public class RoadNetworkGenerator : MonoBehaviour
         
         for (int attempt = 0; attempt < diagonalsToAdd * 3 && added < diagonalsToAdd; attempt++)
         {
-            // Pick two random nodes
             int x1 = random.Next(config.GridWidth);
             int z1 = random.Next(config.GridHeight);
             int x2 = random.Next(config.GridWidth);
@@ -233,23 +233,23 @@ public class RoadNetworkGenerator : MonoBehaviour
             Node node1 = grid[x1, z1];
             Node node2 = grid[x2, z2];
             
-            // Skip if same node or already connected
             if (node1 == node2 || ConnectionExists(newConnections, node1, node2))
                 continue;
             
-            // Skip if too far apart
             float distance = Vector3.Distance(node1.Position, node2.Position);
             if (distance > config.MaxSegmentLength * 2f)
                 continue;
             
-            // Skip if diagonal road passes too close to any other node
             if (DiagonalPassesTooCloseToNodes(node1, node2, grid))
                 continue;
             
-            // Create diagonal connection
+            // Check if this diagonal would create sharp angles at either endpoint
+            if (WouldCreateSharpAngle(node1, node2, newConnections, MIN_ANGLE_DEGREES) ||
+                WouldCreateSharpAngle(node2, node1, newConnections, MIN_ANGLE_DEGREES))
+                continue;
+            
             RoadConnection diagonalConn = new RoadConnection(roadId++, node1, node2);
             
-            // Try to handle crossing (may create bridge)
             bool canAdd = TryHandleRoadCrossing(ref diagonalConn, tempConnections);
             
             if (canAdd)
@@ -266,6 +266,30 @@ public class RoadNetworkGenerator : MonoBehaviour
         }
         
         return newConnections;
+    }
+    
+    private bool WouldCreateSharpAngle(Node atNode, Node toNode, List<RoadConnection> connections, float minAngleDegrees)
+    {
+        Vector3 newDir = (toNode.Position - atNode.Position).normalized;
+        
+        foreach (var conn in connections)
+        {
+            Vector3 existingDir;
+            if (conn.StartNode == atNode)
+                existingDir = (conn.EndNode.Position - atNode.Position).normalized;
+            else if (conn.EndNode == atNode)
+                existingDir = (conn.StartNode.Position - atNode.Position).normalized;
+            else
+                continue;
+            
+            float dot = Vector3.Dot(newDir, existingDir);
+            float angleDegrees = Mathf.Acos(Mathf.Clamp(dot, -1f, 1f)) * Mathf.Rad2Deg;
+            
+            if (angleDegrees < minAngleDegrees)
+                return true;
+        }
+        
+        return false;
     }
     
     private bool DiagonalPassesTooCloseToNodes(Node start, Node end, Node[,] grid)

@@ -223,7 +223,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::CSVLogger
   enableLogging: 1
   logInterval: 0.1
-  outputFilename: vehicle_positions.csv
+  outputFilename: PythonAnalysis/vehicle_positions.csv
   simulationManager: {fileID: 36689295}
 --- !u!1 &330585543
 GameObject:

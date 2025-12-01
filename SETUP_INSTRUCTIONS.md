@@ -135,7 +135,8 @@ The generator uses a **multi-pass system** to ensure network integrity and handl
 - Additional checks:
   1. **Distance Check**: Max 2× segment length
   2. **Proximity Check**: Road must not pass within `MinDistanceFromIntersection` of any other node
-  3. **Crossing Check**: Same as above
+  3. **Sharp Angle Check**: **NEW** - Verifies the new road won't create a sharp angle (< 20°) with any existing road at the start/end nodes. This proactive check prevents "unfixable" intersections.
+  4. **Crossing Check**: Same as above
 
 **Crossing Validation:** (`TryHandleRoadCrossing`)
 - For each potential crossing, checks if bridge is feasible:
@@ -164,7 +165,8 @@ The generator uses a **multi-pass system** to ensure network integrity and handl
 - Continues until no dead-ends remain
 
 **Remove Sharp Angle Roads:** (`RemoveSharpAngleRoads`)
-- **NEW**: Removes roads meeting at angles < 20° at intersections
+- Removes roads meeting at angles < 20° at intersections
+- Acts as a final cleanup pass (most sharp angles now prevented during creation)
 - For each sharp angle found:
   1. Chooses shorter road for removal (minimizes impact)
   2. Validates network stays connected
@@ -1746,10 +1748,13 @@ Stage 5 introduces a traffic signal system to manage flow at complex intersectio
 
 ### 3. Intelligent Lane Grouping
 The system automatically analyzes intersection topology to group lanes:
-- Identifies incoming lanes.
-- Pairs opposite lanes (within ~30° of 180°) to run in the same phase.
-- Creates sequential phases for non-compatible lane groups.
-- Ensures no crossing conflicts during a green phase (mostly).
+- **Angle-Based Sorting**: Sorts all incoming roads by angle (0-360°).
+- **Adjacency Detection**: Identifies adjacent roads (next to each other in the circle).
+- **Phase Assignment**:
+  - Prioritizes pairing roads closest to 180° apart (opposite flow).
+  - **Constraint**: Adjacent roads are NEVER in the same phase (prevents side-impact conflicts).
+  - **Flexible Phasing**: Supports uneven phase counts (e.g., 3 phases for 4 roads) if geometry requires it.
+- **Result**: Safer, conflict-free phases even for irregular intersections.
 
 ### 4. Integration with Intersection Logic
 - **Priority Override**: Traffic lights take precedence over "priority to the right" at lit intersections.
@@ -1831,11 +1836,12 @@ void Update() {
 
 ### Lane Phase Grouping
 On initialization:
-1. Sorts all incoming lanes by angle.
-2. Picks an unassigned lane.
-3. Finds an opposite lane (dot product < -0.866).
-4. Groups them into a `StopLightPhase`.
-5. Repeats until all lanes are assigned.
+1. Sorts all incoming roads by angle (0-360°).
+2. Identifies adjacent road pairs.
+3. Finds best pairings (closest to 180° apart AND not adjacent).
+4. Assigns phases greedily to best pairs first.
+5. Assigns remaining roads to their own phases.
+6. Ensures adjacent roads never share a phase.
 
 ### IntersectionManager Integration
 Modified `CanEnter()` method:

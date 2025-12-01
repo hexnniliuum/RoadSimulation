@@ -37,67 +37,142 @@ public class StopLightController
     
     private void InitializePhases()
     {
-        // 1. Identify all incoming lanes
-        List<Lane> incomingLanes = new List<Lane>();
+        // 1. Identify all incoming lanes with their road directions and angles
+        List<LaneWithDirection> lanesWithDirs = new List<LaneWithDirection>();
+        
         foreach (var road in IntersectionNode.ConnectedRoads)
         {
-            if (road.ForwardLane.EndNode == IntersectionNode) incomingLanes.Add(road.ForwardLane);
-            if (road.BackwardLane.EndNode == IntersectionNode) incomingLanes.Add(road.BackwardLane);
+            Vector3 roadDirFromIntersection;
+            if (road.StartNode == IntersectionNode)
+                roadDirFromIntersection = (road.EndNode.Position - IntersectionNode.Position).normalized;
+            else
+                roadDirFromIntersection = (road.StartNode.Position - IntersectionNode.Position).normalized;
+            
+            float angle = Mathf.Atan2(roadDirFromIntersection.x, roadDirFromIntersection.z) * Mathf.Rad2Deg;
+            if (angle < 0) angle += 360f;
+            
+            if (road.ForwardLane.EndNode == IntersectionNode)
+            {
+                lanesWithDirs.Add(new LaneWithDirection
+                {
+                    Lane = road.ForwardLane,
+                    RoadDirection = roadDirFromIntersection,
+                    Angle = angle
+                });
+            }
+            if (road.BackwardLane.EndNode == IntersectionNode)
+            {
+                lanesWithDirs.Add(new LaneWithDirection
+                {
+                    Lane = road.BackwardLane,
+                    RoadDirection = roadDirFromIntersection,
+                    Angle = angle
+                });
+            }
         }
         
-        // 2. Group lanes into phases
-        // Strategy: Group lanes that are roughly opposite (within ~30 degrees of 180)
-        // and not already assigned.
+        if (lanesWithDirs.Count == 0) return;
         
-        HashSet<Lane> assignedLanes = new HashSet<Lane>();
+        // 2. Group lanes by road direction (same angle = same road = same direction)
+        var roadGroups = lanesWithDirs
+            .GroupBy(l => Mathf.Round(l.Angle))
+            .OrderBy(g => g.Key)
+            .ToList();
         
-        // Sort lanes by angle to make processing deterministic
-        // Use standard angle from (1,0)
-        var lanesWithAngles = incomingLanes.Select(l => new { 
-            Lane = l, 
-            Angle = Mathf.Atan2(l.GetDirection().z, l.GetDirection().x) * Mathf.Rad2Deg 
-        }).OrderBy(x => x.Angle).ToList();
+        int numRoads = roadGroups.Count;
+        if (numRoads == 0) return;
         
-        foreach (var item in lanesWithAngles)
+        // 3. Build road adjacency (roads next to each other in angular order are adjacent)
+        // roadGroups[i] is adjacent to roadGroups[(i+1) % numRoads] and roadGroups[(i-1+numRoads) % numRoads]
+        HashSet<(int, int)> adjacentRoadPairs = new HashSet<(int, int)>();
+        for (int i = 0; i < numRoads; i++)
         {
-            Lane lane = item.Lane;
-            if (assignedLanes.Contains(lane)) continue;
-            
-            // Start a new phase with this lane
-            StopLightPhase phase = new StopLightPhase();
-            phase.Lanes.Add(lane);
-            assignedLanes.Add(lane);
-            
-            // Find an opposite lane to pair with
-            Vector3 dir = lane.GetDirection();
-            
-            foreach (var otherItem in lanesWithAngles)
+            int next = (i + 1) % numRoads;
+            int a = Mathf.Min(i, next);
+            int b = Mathf.Max(i, next);
+            adjacentRoadPairs.Add((a, b));
+        }
+        
+        // 4. Find best pairing: prioritize roads closest to 180° apart, but NOT adjacent
+        List<(int roadA, int roadB, float angleDiff)> possiblePairs = new List<(int, int, float)>();
+        
+        for (int i = 0; i < numRoads; i++)
+        {
+            for (int j = i + 1; j < numRoads; j++)
             {
-                Lane otherLane = otherItem.Lane;
-                if (assignedLanes.Contains(otherLane)) continue;
+                int a = Mathf.Min(i, j);
+                int b = Mathf.Max(i, j);
                 
-                Vector3 otherDir = otherLane.GetDirection();
+                // Skip if adjacent
+                if (adjacentRoadPairs.Contains((a, b))) continue;
                 
-                // Check if opposite (dot product close to -1)
-                // Allow some variance (e.g., > 150 degrees separation)
-                float dot = Vector3.Dot(dir, otherDir);
-                if (dot < -0.866f) // cos(150) approx -0.866
+                float angleA = roadGroups[i].First().Angle;
+                float angleB = roadGroups[j].First().Angle;
+                float diff = Mathf.Abs(angleA - angleB);
+                if (diff > 180f) diff = 360f - diff;
+                float deviationFrom180 = Mathf.Abs(diff - 180f);
+                
+                possiblePairs.Add((i, j, deviationFrom180));
+            }
+        }
+        
+        // Sort by closest to 180° (smallest deviation first)
+        possiblePairs = possiblePairs.OrderBy(p => p.angleDiff).ToList();
+        
+        // 5. Greedy assignment: pair roads closest to 180° that aren't adjacent
+        HashSet<int> assignedRoads = new HashSet<int>();
+        Dictionary<int, int> roadToPhase = new Dictionary<int, int>();
+        int currentPhase = 0;
+        
+        foreach (var pair in possiblePairs)
+        {
+            if (assignedRoads.Contains(pair.roadA) || assignedRoads.Contains(pair.roadB))
+                continue;
+            
+            roadToPhase[pair.roadA] = currentPhase;
+            roadToPhase[pair.roadB] = currentPhase;
+            assignedRoads.Add(pair.roadA);
+            assignedRoads.Add(pair.roadB);
+            currentPhase++;
+        }
+        
+        // 6. Assign remaining unpaired roads to their own phases
+        for (int i = 0; i < numRoads; i++)
+        {
+            if (!assignedRoads.Contains(i))
+            {
+                roadToPhase[i] = currentPhase;
+                currentPhase++;
+            }
+        }
+        
+        // 7. Build phases from road assignments (include all lanes from each road)
+        int maxPhase = roadToPhase.Values.Max();
+        for (int p = 0; p <= maxPhase; p++)
+        {
+            StopLightPhase phase = new StopLightPhase();
+            foreach (var kvp in roadToPhase)
+            {
+                if (kvp.Value == p)
                 {
-                    // Found a pair!
-                    phase.Lanes.Add(otherLane);
-                    assignedLanes.Add(otherLane);
-                    break; // Only pair one opposite lane per phase for simplicity
+                    foreach (var lwd in roadGroups[kvp.Key])
+                    {
+                        phase.Lanes.Add(lwd.Lane);
+                    }
                 }
             }
-            
-            phases.Add(phase);
+            if (phase.Lanes.Count > 0)
+            {
+                phases.Add(phase);
+            }
         }
-        
-        // If no phases created (shouldn't happen if there are roads), create a default one
-        if (phases.Count == 0)
-        {
-            Debug.LogWarning($"StopLightController: No phases created for Node {IntersectionNode.ID}");
-        }
+    }
+    
+    private struct LaneWithDirection
+    {
+        public Lane Lane;
+        public Vector3 RoadDirection;
+        public float Angle;
     }
     
     public void Update(float deltaTime)

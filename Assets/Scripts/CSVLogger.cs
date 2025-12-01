@@ -15,8 +15,8 @@ public class CSVLogger : MonoBehaviour
     [Tooltip("Time interval between logs (seconds)")]
     [SerializeField] private float logInterval = 0.1f;
     
-    [Tooltip("Output filename (in project root)")]
-    [SerializeField] private string outputFilename = "vehicle_positions.csv";
+    [Tooltip("Output filename (relative to project root)")]
+    [SerializeField] private string outputFilename = "PythonAnalysis/vehicle_positions.csv";
     
     [Tooltip("Reference to SimulationManager")]
     [SerializeField] private SimulationManager simulationManager;
@@ -74,7 +74,15 @@ public class CSVLogger : MonoBehaviour
         }
         
         // Create file path (in project root, outside Assets folder)
-        filePath = Path.Combine(Application.dataPath, "..", outputFilename);
+        string projectRoot = Path.Combine(Application.dataPath, "..");
+        filePath = Path.Combine(projectRoot, outputFilename);
+        
+        // Ensure the directory exists
+        string directory = Path.GetDirectoryName(filePath);
+        if (!Directory.Exists(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
         
         try
         {
