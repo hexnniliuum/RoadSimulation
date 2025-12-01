@@ -104,7 +104,7 @@ Represents a curved path for turning at intersections.
 - Uses quadratic Bézier curve (start, control, end)
 - **CalculateControlPoint**: Complex logic to find smooth control point
   - Uses ray intersection of lane directions for most cases
-  - Special handling for parallel roads, distant intersections, and very sharp turns
+  - **Sharp Turn Handling**: Uses ray intersection for turns > 140° to create natural inner/outer curves
   - Clamps control point distance to prevent wild curves
   - Right-side driving: perpendicular offset uses `(direction.z, 0, -direction.x)`
 
@@ -218,7 +218,7 @@ Creates actual `Road` objects with `Lane` geometry:
 #### Pass 7: Turn Curve Precomputation (`PrecomputeTurnCurves`)
 
 For each node, generates turn curves between all lane pairs:
-- **Skip condition**: Turns > 140° (roads meeting at < 40°) are too sharp
+- **Skip condition**: Turns > 140° (roads meeting at < 40°) are too sharp (**EXCEPT** at trivial 2-road intersections)
 - Otherwise creates quadratic Bézier curve for smooth turn
 - Turn type classification:
   - Straight: angle ≈ 0° (continuing through)
@@ -1668,6 +1668,20 @@ This multi-pass approach allows dynamic response to changing intersection condit
 - Performance impact: negligible (<0.1ms for 100 cars on bridges)
 
 **Verification:** Use `SpeedVerificationTool` component (attach to SimulationManager) to analyze lane lengths and speed corrections.
+
+---
+
+## Turn Curve Generation Fixes (Technical Note)
+
+**Issue Fixed:**
+1. Trivial intersections (2 roads) with sharp angles (>140°) were not generating turn curves, causing cars to get stuck.
+2. Sharp angle turns were generating curves in the wrong direction (looping backwards) or with poor geometry.
+
+**Solution:**
+- **Trivial Intersections**: Bypassed the "turn too sharp" check for nodes with exactly 2 connected roads.
+- **Sharp Turn Geometry**: Updated `CalculateControlPoint` to use ray intersection between incoming and outgoing directions.
+  - Handles both inner and outer turns correctly by finding the natural intersection point.
+  - Falls back to extending in incoming direction if rays don't intersect reasonably.
 
 ---
 

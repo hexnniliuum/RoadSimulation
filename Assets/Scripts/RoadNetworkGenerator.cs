@@ -657,6 +657,10 @@ public class RoadNetworkGenerator : MonoBehaviour
                     outgoingLanes.Add(road.BackwardLane);
             }
             
+            // Check if this is a trivial intersection (only 2 roads)
+            // Trivial intersections must allow their only turn regardless of angle
+            bool isTrivial = node.IsTrivialIntersection();
+            
             // Create turn curves for all valid combinations (excluding U-turns and sharp turns)
             foreach (Lane inLane in incomingLanes)
             {
@@ -667,7 +671,8 @@ public class RoadNetworkGenerator : MonoBehaviour
                         continue;
                     
                     // Prevent turns that are too sharp (< 40 degrees)
-                    if (IsTurnTooSharp(inLane, outLane))
+                    // EXCEPT for trivial intersections where this is the only path
+                    if (!isTrivial && IsTurnTooSharp(inLane, outLane))
                         continue;
                     
                     TurnCurve curve = new TurnCurve(inLane, outLane, config.TurnRadius);

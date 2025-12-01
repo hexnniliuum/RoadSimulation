@@ -378,18 +378,36 @@ public class TurnCurve
             return Vector3.Lerp(start, end, 0.5f);
         }
         
-        // For very sharp angles (>140 degrees turn), use simple offset approach
+        // For very sharp angles (>140 degrees turn), use ray intersection with special handling
         if (dot < -0.766f) // cos(140°) ≈ -0.766
         {
-            // Sharp turn - use midpoint with small perpendicular offset
-            Vector3 midpoint = (start + end) * 0.5f;
-            Vector3 toEnd = (end - start).normalized;
-            Vector3 perpendicular = new Vector3(toEnd.z, 0, -toEnd.x); // Right-side driving
+            // Find intersection of rays from start (in inDir) and end (in -outDir)
+            // This naturally creates the correct curve shape for both inner and outer turns
+            Vector3 sharpD1 = inDir;
+            Vector3 sharpD2 = -outDir;
             
-            // Determine turn direction from cross product
-            float cross = Vector3.Cross(inDir, outDir).y;
-            float offsetAmount = Mathf.Min(radius, Vector3.Distance(start, end) * 0.3f);
-            return midpoint + perpendicular * Mathf.Sign(cross) * offsetAmount;
+            float sharpDenom = sharpD1.x * sharpD2.z - sharpD1.z * sharpD2.x;
+            
+            if (Mathf.Abs(sharpDenom) > 0.001f)
+            {
+                float sharpT = ((end.x - start.x) * sharpD2.z - (end.z - start.z) * sharpD2.x) / sharpDenom;
+                
+                // For sharp angles, the intersection might be further away - allow more distance
+                float maxDist = Vector3.Distance(start, end) * 3.0f;
+                
+                if (sharpT > 0 && sharpT < maxDist)
+                {
+                    Vector3 sharpIntersection = start + sharpD1 * sharpT;
+                    sharpIntersection.y = start.y;
+                    return sharpIntersection;
+                }
+            }
+            
+            // Fallback: extend slightly in incoming direction
+            float extensionAmount = Vector3.Distance(start, end) * 0.4f;
+            Vector3 sharpControl = start + inDir * extensionAmount;
+            sharpControl.y = start.y;
+            return sharpControl;
         }
         
         // Calculate intersection point of the two lane directions
