@@ -75,12 +75,13 @@ public class BridgeInfo
         if (distance < StartDistance || distance > EndDistance)
             return 0f; // Flat ground level
         
-        // Use smooth parabolic curve
         float bridgeProgress = (distance - StartDistance) / (EndDistance - StartDistance);
-        
-        // Parabolic curve: peaks at 0.5, returns to 0 at edges
-        float curveValue = 4f * bridgeProgress * (1f - bridgeProgress);
-        
+
+        // Cosine profile: same zeros and peak as the old parabola, but with
+        // zero slope at both ends so the ramp meets the flat road smoothly
+        // (the parabola kinked at ~51 degrees at each ramp foot)
+        float curveValue = 0.5f * (1f - Mathf.Cos(2f * Mathf.PI * bridgeProgress));
+
         return curveValue * PeakHeight;
     }
 }
@@ -336,6 +337,11 @@ public class TurnCurve
     public float ArcLength;
     public TurnType Type;
 
+    // Cumulative arc-length lookup so distance along the curve maps to the
+    // Bezier parameter uniformly (a quadratic Bezier is not uniform in t;
+    // without this, cars visibly speed up and slow down through turns)
+    private float[] cumulativeLengths;
+
     public enum TurnType { Straight, Left, Right }
 
     public TurnCurve(Lane from, Lane to, float radius)
@@ -366,7 +372,7 @@ public class TurnCurve
             ControlPoint = CalculateControlPoint(StartPoint, EndPoint, incomingDir, outgoingDir, radius);
         }
 
-        ArcLength = EstimateArcLength();
+        BuildArcLengthTable();
     }
 
     private Vector3 CalculateControlPoint(Vector3 start, Vector3 end, Vector3 inDir, Vector3 outDir, float radius)
@@ -447,22 +453,55 @@ public class TurnCurve
         return intersection;
     }
 
-    private float EstimateArcLength()
+    private void BuildArcLengthTable()
     {
-        // Approximate arc length by sampling the curve
-        int samples = 10;
+        // Sample cumulative arc length along the curve; also yields ArcLength
+        int samples = 24;
+        cumulativeLengths = new float[samples + 1];
         float length = 0f;
         Vector3 prevPoint = GetPointOnCurve(0f);
-        
+
         for (int i = 1; i <= samples; i++)
         {
             float t = i / (float)samples;
             Vector3 point = GetPointOnCurve(t);
             length += Vector3.Distance(prevPoint, point);
+            cumulativeLengths[i] = length;
             prevPoint = point;
         }
-        
-        return length;
+
+        ArcLength = length;
+    }
+
+    /// <summary>
+    /// Convert an arc distance along the curve to the Bezier parameter t,
+    /// interpolating within the cumulative-length table.
+    /// </summary>
+    public float GetTForArcDistance(float distance)
+    {
+        if (cumulativeLengths == null)
+        {
+            BuildArcLengthTable();
+        }
+
+        if (distance <= 0f)
+            return 0f;
+        if (distance >= ArcLength)
+            return 1f;
+
+        int samples = cumulativeLengths.Length - 1;
+        for (int i = 1; i <= samples; i++)
+        {
+            if (cumulativeLengths[i] >= distance)
+            {
+                float segmentStart = cumulativeLengths[i - 1];
+                float segmentLength = cumulativeLengths[i] - segmentStart;
+                float fraction = segmentLength > 0.0001f ? (distance - segmentStart) / segmentLength : 0f;
+                return (i - 1 + fraction) / samples;
+            }
+        }
+
+        return 1f;
     }
 
     public Vector3 GetPointOnCurve(float t)

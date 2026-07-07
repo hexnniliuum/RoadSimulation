@@ -85,9 +85,6 @@ public class RoadGenerationConfig : ScriptableObject
     
     [Tooltip("Time to wait before forcing entry to break deadlock (seconds)")]
     public float DeadlockTimeout = 5f;
-    
-    [Tooltip("Threshold distance for turn curve conflict detection")]
-    public float TurnConflictThreshold = 4f;
 
     private void OnValidate()
     {
