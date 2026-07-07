@@ -44,7 +44,9 @@ public class CSVLogger : MonoBehaviour
         if (timeSinceLastLog >= logInterval)
         {
             LogVehiclePositions();
-            timeSinceLastLog = 0f;
+            // Subtract the interval instead of resetting to zero so the
+            // average cadence stays exactly logInterval despite frame quantization
+            timeSinceLastLog -= logInterval;
         }
     }
     

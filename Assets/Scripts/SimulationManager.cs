@@ -39,15 +39,7 @@ public class SimulationManager : MonoBehaviour
         if (generateOnStart)
         {
             GenerateRoadNetwork();
-            
-            // Initialize intersection management system
-            if (roadMap != null)
-            {
-                intersectionManager = new IntersectionManager();
-                intersectionManager.Initialize(roadMap, roadGenerator.GetConfig());
-                Debug.Log("IntersectionManager initialized");
-            }
-            
+
             if (spawnCarsOnStart && roadMap != null)
             {
                 SpawnCars();
@@ -73,13 +65,18 @@ public class SimulationManager : MonoBehaviour
         }
 
         roadMap = roadGenerator.GenerateRoadNetwork();
-        
+
         if (roadMap != null)
         {
             Debug.Log($"Road network generated successfully with seed {roadMap.RandomSeed}");
-            
+
             if (roadVisualizer != null)
                 roadVisualizer.UpdateVisualization();
+
+            // (Re)build intersection management for the new network so stale
+            // state can never point at lanes that no longer exist
+            intersectionManager = new IntersectionManager();
+            intersectionManager.Initialize(roadMap, roadGenerator.GetConfig());
         }
         else
         {
@@ -177,9 +174,13 @@ public class SimulationManager : MonoBehaviour
             if (car != null)
                 Destroy(car.gameObject);
         }
-        
+
         activeCars.Clear();
         nextCarID = 0;
+
+        // Destroyed cars must not linger in intersection queues/crossings -
+        // stale references would permanently block their lanes
+        intersectionManager?.ResetCarState();
     }
     
     /// <summary>

@@ -140,17 +140,21 @@ public class RoadNetworkGenerator : MonoBehaviour
                 Node current = grid[x, z];
                 int nextX = (x + 1) % config.GridWidth;
                 Node next = grid[nextX, z];
-                
+
                 bool isWrapAround = (nextX == 0 && x == config.GridWidth - 1);
-                
-                if (!ConnectionExists(connections, current, next) &&
-                    (!isWrapAround || IsReasonableWrapDistance(current, next)))
+
+                // Wrap-around roads span the whole grid, so like diagonals they
+                // must not pass through unrelated intersections
+                bool wrapAcceptable = !isWrapAround ||
+                    (IsReasonableWrapDistance(current, next) && !PassesTooCloseToNodes(current, next, grid));
+
+                if (!ConnectionExists(connections, current, next) && wrapAcceptable)
                 {
                     RoadConnection conn = new RoadConnection(roadId++, current, next);
-                    
+
                     // Check for crossing and try to create bridge or reject
                     bool canAdd = TryHandleRoadCrossing(ref conn, tempConnections);
-                    
+
                     if (canAdd)
                     {
                         connections.Add(conn);
@@ -161,9 +165,9 @@ public class RoadNetworkGenerator : MonoBehaviour
                         Debug.LogWarning($"Skipping road from Node {current.ID} to {next.ID}: crossing not feasible for bridge");
                     }
                 }
-                else if (!ConnectionExists(connections, current, next) && isWrapAround && !IsReasonableWrapDistance(current, next))
+                else if (!ConnectionExists(connections, current, next) && isWrapAround)
                 {
-                    Debug.LogWarning($"Skipping wrap-around road from Node {current.ID} to {next.ID}: distance too large ({Vector3.Distance(current.Position, next.Position):F1})");
+                    Debug.LogWarning($"Skipping wrap-around road from Node {current.ID} to {next.ID}: too long or passes through another intersection ({Vector3.Distance(current.Position, next.Position):F1})");
                 }
             }
         }
@@ -176,17 +180,19 @@ public class RoadNetworkGenerator : MonoBehaviour
                 Node current = grid[x, z];
                 int nextZ = (z + 1) % config.GridHeight;
                 Node next = grid[x, nextZ];
-                
+
                 bool isWrapAround = (nextZ == 0 && z == config.GridHeight - 1);
-                
-                if (!ConnectionExists(connections, current, next) &&
-                    (!isWrapAround || IsReasonableWrapDistance(current, next)))
+
+                bool wrapAcceptable = !isWrapAround ||
+                    (IsReasonableWrapDistance(current, next) && !PassesTooCloseToNodes(current, next, grid));
+
+                if (!ConnectionExists(connections, current, next) && wrapAcceptable)
                 {
                     RoadConnection conn = new RoadConnection(roadId++, current, next);
-                    
+
                     // Check for crossing and try to create bridge or reject
                     bool canAdd = TryHandleRoadCrossing(ref conn, tempConnections);
-                    
+
                     if (canAdd)
                     {
                         connections.Add(conn);
@@ -197,9 +203,9 @@ public class RoadNetworkGenerator : MonoBehaviour
                         Debug.LogWarning($"Skipping road from Node {current.ID} to {next.ID}: crossing not feasible for bridge");
                     }
                 }
-                else if (!ConnectionExists(connections, current, next) && isWrapAround && !IsReasonableWrapDistance(current, next))
+                else if (!ConnectionExists(connections, current, next) && isWrapAround)
                 {
-                    Debug.LogWarning($"Skipping wrap-around road from Node {current.ID} to {next.ID}: distance too large ({Vector3.Distance(current.Position, next.Position):F1})");
+                    Debug.LogWarning($"Skipping wrap-around road from Node {current.ID} to {next.ID}: too long or passes through another intersection ({Vector3.Distance(current.Position, next.Position):F1})");
                 }
             }
         }
@@ -240,7 +246,7 @@ public class RoadNetworkGenerator : MonoBehaviour
             if (distance > config.MaxSegmentLength * 2f)
                 continue;
             
-            if (DiagonalPassesTooCloseToNodes(node1, node2, grid))
+            if (PassesTooCloseToNodes(node1, node2, grid))
                 continue;
             
             // Check if this diagonal would create sharp angles at either endpoint
@@ -292,7 +298,7 @@ public class RoadNetworkGenerator : MonoBehaviour
         return false;
     }
     
-    private bool DiagonalPassesTooCloseToNodes(Node start, Node end, Node[,] grid)
+    private bool PassesTooCloseToNodes(Node start, Node end, Node[,] grid)
     {
         // Check if the line from start to end passes too close to any other node
         float minDistance = config.MinDistanceFromIntersection;
@@ -468,13 +474,24 @@ public class RoadNetworkGenerator : MonoBehaviour
                 
                 if (LineSegmentsIntersect(p1, p2, p3, p4, out Vector3 crossingPoint))
                 {
-                    // Roads cross - check if we can create a bridge
-                    // Only create bridge on ONE road (arbitrarily choose the first one)
+                    // Roads cross - bridge whichever of the two has room for
+                    // ramps; validating only one side let crossings slip
+                    // through with no bridge at all (flat lane overlap)
                     if (CanCreateBridge(conn, other, crossingPoint))
                     {
                         AddBridge(ref conn, crossingPoint);
                         connections[i] = conn; // Update the struct in the list
                         bridgeCount++;
+                    }
+                    else if (CanCreateBridge(other, conn, crossingPoint))
+                    {
+                        AddBridge(ref other, crossingPoint);
+                        connections[j] = other;
+                        bridgeCount++;
+                    }
+                    else
+                    {
+                        Debug.LogWarning($"Roads {conn.ID} and {other.ID} cross at {crossingPoint} but neither can carry a bridge - lanes overlap at grade");
                     }
                 }
             }
@@ -510,9 +527,33 @@ public class RoadNetworkGenerator : MonoBehaviour
             config.BridgeHeight,
             rampLength
         );
-        
-        // Add bridge to the list
+
+        // Add bridge to the list, merging overlapping intervals: Lane SUMS the
+        // elevation of every bridge, so stacked intervals would produce
+        // double-height lumps with slope kinks
         conn.Bridges.Add(bridge);
+        ConsolidateBridges(conn.Bridges);
+    }
+
+    private void ConsolidateBridges(List<BridgeInfo> bridges)
+    {
+        if (bridges.Count < 2)
+            return;
+
+        bridges.Sort((a, b) => a.StartDistance.CompareTo(b.StartDistance));
+
+        for (int i = bridges.Count - 2; i >= 0; i--)
+        {
+            BridgeInfo current = bridges[i];
+            BridgeInfo next = bridges[i + 1];
+
+            if (next.StartDistance <= current.EndDistance)
+            {
+                current.EndDistance = Mathf.Max(current.EndDistance, next.EndDistance);
+                current.PeakHeight = Mathf.Max(current.PeakHeight, next.PeakHeight);
+                bridges.RemoveAt(i + 1);
+            }
+        }
     }
     
     private Dictionary<(int, int), float> CalculateAllStopDistances(List<RoadConnection> connections)
@@ -594,8 +635,11 @@ public class RoadNetworkGenerator : MonoBehaviour
             float geometricDistance = (roadWidth / 2f) / Mathf.Tan(halfAngle);
             float requiredDistance = geometricDistance * 1.15f;
             
-            // Cap maximum cutoff to prevent overly aggressive cutbacks at very sharp angles
-            float maxCutoff = config.StopLineDistance * 3f; // Max 3x the base distance
+            // Cap the cutback at the requirement for the sharpest angle the
+            // pipeline permits (20°, per RemoveSharpAngleRoads and diagonal
+            // placement). A fixed low cap left 20-37° intersections with
+            // overlapping lanes; road length is clamped in CreateRoadsWithLanes.
+            float maxCutoff = (roadWidth / 2f) / Mathf.Tan(20f * 0.5f * Mathf.Deg2Rad) * 1.15f;
             requiredDistance = Mathf.Min(requiredDistance, maxCutoff);
             
             // Use the larger of base distance or calculated distance
@@ -612,7 +656,19 @@ public class RoadNetworkGenerator : MonoBehaviour
         {
             float stopDistStart = stopDistances[(conn.ID, conn.StartNode.ID)];
             float stopDistEnd = stopDistances[(conn.ID, conn.EndNode.ID)];
-            
+
+            // Never let the two setbacks consume the whole road: lane start
+            // would land past lane end, inverting the lane direction
+            float totalSetback = stopDistStart + stopDistEnd;
+            float maxTotal = conn.Length - 2f;
+            if (totalSetback > maxTotal)
+            {
+                float scale = Mathf.Max(0f, maxTotal) / totalSetback;
+                stopDistStart *= scale;
+                stopDistEnd *= scale;
+                Debug.LogWarning($"Road {conn.ID}: stop distances scaled by {scale:F2} to fit road length {conn.Length:F1}");
+            }
+
             Road road = new Road(conn.ID, conn.StartNode, conn.EndNode, config.LaneWidth, stopDistStart, stopDistEnd, conn.Bridges);
             roadMap.Roads.Add(road);
             conn.StartNode.ConnectedRoads.Add(road);
@@ -688,19 +744,40 @@ public class RoadNetworkGenerator : MonoBehaviour
             // Create turn curves for all valid combinations (excluding U-turns and sharp turns)
             foreach (Lane inLane in incomingLanes)
             {
+                Lane bestFallback = null;
+                float bestFallbackAngle = float.MaxValue;
+
                 foreach (Lane outLane in outgoingLanes)
                 {
                     // Prevent U-turn (going back on the same road)
                     if (IsUTurn(inLane, outLane))
                         continue;
-                    
+
                     // Prevent turns that are too sharp (< 40 degrees)
                     // EXCEPT for trivial intersections where this is the only path
                     if (!isTrivial && IsTurnTooSharp(inLane, outLane))
+                    {
+                        // Remember the least-sharp rejected turn as a fallback
+                        float angle = TurnAngleDegrees(inLane, outLane);
+                        if (angle < bestFallbackAngle)
+                        {
+                            bestFallbackAngle = angle;
+                            bestFallback = outLane;
+                        }
                         continue;
-                    
+                    }
+
                     TurnCurve curve = new TurnCurve(inLane, outLane, config.TurnRadius);
                     inLane.AvailableTurns.Add(curve);
+                }
+
+                // A lane with no exits strands cars at its end forever and
+                // permanently blocks everyone behind them - keep the least-sharp
+                // turn even when it violates the sharpness limit
+                if (inLane.AvailableTurns.Count == 0 && bestFallback != null)
+                {
+                    inLane.AvailableTurns.Add(new TurnCurve(inLane, bestFallback, config.TurnRadius));
+                    Debug.LogWarning($"Lane {inLane.ID} at node {node.ID}: keeping sharp turn ({bestFallbackAngle:F0}°) as its only exit");
                 }
             }
         }
@@ -717,16 +794,18 @@ public class RoadNetworkGenerator : MonoBehaviour
         // Check if the turn angle is too sharp (> 140 degrees turn required)
         // This corresponds to roads meeting at < 40 degrees
         const float MAX_TURN_ANGLE = 140f; // degrees
-        
+
+        // Sharp turn = large angle change (close to 180° = U-turn)
+        return TurnAngleDegrees(inLane, outLane) > MAX_TURN_ANGLE;
+    }
+
+    private float TurnAngleDegrees(Lane inLane, Lane outLane)
+    {
         Vector3 incomingDir = inLane.GetDirection();
         Vector3 outgoingDir = outLane.GetDirection();
-        
-        // Calculate angle between directions
+
         float dot = Vector3.Dot(incomingDir, outgoingDir);
-        float angleDegrees = Mathf.Acos(Mathf.Clamp(dot, -1f, 1f)) * Mathf.Rad2Deg;
-        
-        // Sharp turn = large angle change (close to 180° = U-turn)
-        return angleDegrees > MAX_TURN_ANGLE;
+        return Mathf.Acos(Mathf.Clamp(dot, -1f, 1f)) * Mathf.Rad2Deg;
     }
 
     private void RemoveRandomNodes()

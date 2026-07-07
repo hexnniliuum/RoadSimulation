@@ -1,6 +1,6 @@
 # Unity Procedural Traffic Simulation
 
-A 3D traffic simulation framework implemented in Unity. This system features procedural road network generation, physics-based vehicle dynamics, and autonomous intersection management with support for signalized and unsignalized traffic control.
+A 3D traffic simulation framework implemented in Unity. This system features procedural road network generation, kinematic vehicle agents with physically consistent braking, and autonomous intersection management with support for signalized and unsignalized traffic control.
 
 ## System Overview
 
@@ -9,77 +9,80 @@ The simulation operates on a right-hand traffic model and generates road network
 ### Core Capabilities
 
 *   **Procedural Topology**: Automated generation of nodes and edges with configurable jitter, bridges, and randomized connectivity.
-*   **Agent Dynamics**: Physics-based vehicle movement including kinematic braking, collision avoidance, and queue management.
-*   **Intersection Logic**: Autonomous conflict resolution using priority rules, deadlock timeouts, and traffic signal state machines.
-*   **Telemetry**: High-frequency CSV export of vehicle positions for external analysis.
+*   **Agent Dynamics**: Physics-consistent speed control — safe-following with reaction-time headway, smooth braking curves toward stop lines, and cross-segment lookahead so vehicles see traffic through intersections.
+*   **Intersection Logic**: Autonomous conflict resolution using turn-path conflict maps, priority rules, yield-to-committed-traffic and don't-block-the-box rules, deadlock timeouts, and traffic signal state machines with latched stop/go decisions at yellow.
+*   **Telemetry**: High-frequency CSV export of vehicle positions, with a bundled Python analysis script for detecting braking anomalies.
 
 ## Technical Architecture
 
 ### Control Systems
-*   **`SimulationManager`**: Central orchestrator for subsystem initialization and update loops.
-*   **`IntersectionManager`**: Manages node states, priority enforcement, and queue tracking.
+*   **`SimulationManager`**: Central orchestrator for subsystem initialization, car spawning, and update loops.
+*   **`IntersectionManager`**: Manages node states, entry arbitration (lights, queues, conflicts, priority), run-light commitments, and deadlock breaking.
 *   **`StopLightController`**: Implements state machines for signalized intersections (Green/Yellow/Red phases).
 
 ### Generation Pipeline
-*   **`RoadNetworkGenerator`**: Executes multi-pass procedural generation (Grid -> Topology -> Pruning -> Bridges -> Geometry).
+*   **`RoadNetworkGenerator`**: Executes multi-pass procedural generation (Grid -> Topology -> Pruning -> Bridges -> Geometry -> Turn precomputation).
 *   **`RoadNetworkData`**: Defines graph structures (`Node`, `Road`, `Lane`, `TurnCurve`, `BridgeInfo`).
 
 ### Agents
-*   **`CarController`**: Handles individual vehicle state (`OnLane`, `Approaching`, `Waiting`, `Crossing`) and physics.
+*   **`CarController`**: Handles individual vehicle state (`OnLane`, `Approaching`, `WaitingToEnter`, `Crossing`), target-speed computation, and path following.
 
 ## Installation
 
 ### Prerequisites
-*   Unity Editor 2021.3 or later.
-*   Standard 3D Render Pipeline.
+*   Unity **6000.3.19f1** (Unity 6.3 LTS) — the project is pinned to this version; opening with a different editor triggers a one-way upgrade.
+*   Universal Render Pipeline (URP 17.3).
 
 ### Setup
-1.  Clone the repository into the root of a standard 3D Unity project.
-2.  Ensure all scripts are located in `Assets/Scripts`.
-3.  Create a `RoadGenerationConfig` asset via **Create > Traffic Simulation > Road Generation Config**.
-4.  Configure the `SimulationManager` GameObject with required components (`RoadNetworkGenerator`, `RoadNetworkVisualizer`, `IntersectionManager`, `CSVLogger`).
-5.  Assign the `CarController` prefab to the simulation manager.
+1.  Clone the repository.
+2.  In Unity Hub, choose **Add > Add project from disk** and select the cloned folder, then open it.
+3.  Open `Assets/Scenes/SampleScene.unity` and press Play.
+
+See [SETUP_INSTRUCTIONS.md](SETUP_INSTRUCTIONS.md) for the full parameter reference and component wiring details.
 
 ## Configuration
 
-Configuration is managed via the `RoadGenerationConfig` ScriptableObject.
+Configuration is managed via the `RoadGenerationConfig` ScriptableObject (`Assets/DefaultRoadConfig.asset`).
 
 | Parameter | Default | Description |
 | :--- | :--- | :--- |
-| **Grid Dimensions** | 4x4 | Width/Height of the node grid. |
-| **Segment Length** | 50-100 | Range for road segment lengths. |
-| **Intersection Jitter** | 20 | Node displacement factor. |
-| **Traffic Light %** | 50% | Percentage of eligible intersections to signalize. |
-| **Deadlock Timeout** | 3.0s | Time threshold for forced entry during gridlock. |
+| **Grid Dimensions** | 4x3 | Width/height of the node grid. |
+| **Segment Length** | 30-50 | Range for road segment lengths. |
+| **Intersection Jitter** | 3 | Node displacement in world units. |
+| **Traffic Light %** | 100% | Percentage of eligible intersections (3+ roads) to signalize. |
+| **Deadlock Timeout** | 5.0s | Time threshold for forced entry during gridlock (unsignalized only). |
+| **Random Seed** | 0 | Fixed seed for reproducible networks (0 = random). |
+
+Vehicle parameters (target speed, braking, follow headway) live on the car prefab's `CarController`; car count lives on the `SimulationManager`.
 
 ## Telemetry
 
-The system exports vehicle data to `vehicle_positions.csv` in the project root.
+The system exports vehicle data to `PythonAnalysis/vehicle_positions.csv` at 10 Hz (one row per car per interval, file recreated each run).
 
 **Format**:
 ```csv
 vehicle_id, positionX, positionY, positionZ, time
 ```
 
-**Note**: This repository generates raw data only. No internal analysis tools are included; must parse the CSV/JSON output externally.
+`PythonAnalysis/brake_analysis.py` (Python 3) computes per-vehicle speed/acceleration from the log and reports braking events that exceed the cars' physical braking capability — useful for regression-testing driving behavior.
 
 ## Interaction & Usage
 
 **Note**: The project is currently designed for interaction exclusively via the Unity Editor.
 *   **Configuration**: Parameters are modified via the `RoadGenerationConfig` asset in the Inspector.
 *   **Visualization**: Runtime monitoring is performed through the Unity Scene View (Gizmos) and Inspector debug data. There is no runtime UI or build-ready player interface.
+*   **Editor tip**: Set *Preferences > General > Script Changes While Playing* to "Recompile After Finished Playing" — the road graph does not survive a mid-play domain reload.
 
 ## Known Issues
 
-*   **Braking Instability**: Sporadic sudden braking events may occur due to physics calculation edge cases.
-*   **Priority Logic**: Signalized intersections may exhibit suboptimal yielding behavior under heavy load.
-*   **Topology Generation**: High jitter values can result in lane overlaps or generation failures.
-*   **Bridge Geometry**: Multi-segment bridges do not currently maintain a continuous smooth curve.
+*   **Topology Generation**: High jitter values can still produce overlapping roads and intersection generation errors.
+*   **Right of Way**: Priority rules are sometimes overridden — the deadlock breaker, run-light commitments, and physics exemptions (a car that can no longer stop is let through) can supersede the normal right-of-way order.
+*   **Turn Geometry**: Turn arcs through an intersection can overlap; sharp turns in particular may bulge outside the intersection footprint.
 
 ## Limitations
 
 *   **Collision Complexity**: O(N²) collision detection; optimized for <100 vehicles.
-*   **Perception**: Agents do not perceive traffic beyond the immediate intersection.
+*   **Perception**: Agents see one path segment ahead (through the next intersection), but no further.
 *   **Turn Restrictions**: U-turns are disabled to prevent flow loops.
 *   **Signal Timing**: Traffic lights operate on fixed-time intervals without sensor actuation.
 
