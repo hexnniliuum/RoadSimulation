@@ -285,7 +285,18 @@ public class CarController : MonoBehaviour
         {
             if (!CanProceedIntoIntersection())
             {
-                limit = Mathf.Min(limit, BrakingSpeedForDistance(distanceToStopLine - STOP_LINE_BUFFER, ComfortableBraking));
+                // Brake on the accelerate-then-stop envelope (harmonic blend of
+                // MaxAcceleration and ComfortableBraking), not the pure braking
+                // curve: a queued car restarting a few units short of the line
+                // accelerates under the pure curve and only meets it at the line,
+                // arriving too fast to hold and eligible for the escape hatch in
+                // CanProceedIntoIntersection. The blended curve is the fastest
+                // profile that can still stop at the line from a standing restart
+                // anywhere along the approach, so arrival stays below the hatch's
+                // mover threshold and the yield gate keeps its authority.
+                float restartSafeDecel = MaxAcceleration * ComfortableBraking
+                                         / (MaxAcceleration + ComfortableBraking);
+                limit = Mathf.Min(limit, BrakingSpeedForDistance(distanceToStopLine - STOP_LINE_BUFFER, restartSafeDecel));
             }
         }
 
@@ -323,7 +334,16 @@ public class CarController : MonoBehaviour
 
         // Escape hatch: if the box/yield constraint materialized inside our
         // physical stopping distance, enter anyway - cross-boundary following
-        // parks us on the curve if needed, which beats an instant stop
+        // parks us on the curve if needed, which beats an instant stop. Only
+        // a genuine mover qualifies: a slow or stopped car can always hold,
+        // and a car at the line has negative distanceToStop, so without the
+        // speed gate every waiting car would take the hatch and bypass the
+        // yield rules the moment the light turns green.
+        if (currentSpeed < 3f)
+        {
+            return false;
+        }
+
         float distanceToStop = currentLane.Length - distanceAlongPath - STOP_LINE_BUFFER;
         float minStoppingDistance = (currentSpeed * currentSpeed) / (2f * MaxBraking);
         return distanceToStop < minStoppingDistance * 0.9f;
@@ -417,6 +437,15 @@ public class CarController : MonoBehaviour
             float theirTimeToArrival = theirDistToLine / Mathf.Max(car.currentSpeed, 0.1f);
             if (theirDistToLine > INTERSECTION_DETECTION_DISTANCE && theirTimeToArrival > YIELD_TIME_HORIZON)
                 continue; // genuinely far and not arriving soon - a large enough gap
+
+            // A car parked short of the line is boxed in behind its own queue
+            // head (queue spacing keeps followers 4+ units back) and cannot be
+            // the next to enter from its lane, so it holds no immediate claim.
+            // Yielding to it stalls both approaches when its own head is a
+            // yielding turn too: each head waits on a follower that can never
+            // arrive while the heads hold.
+            if (car.currentSpeed < 0.5f && theirDistToLine > 3f)
+                continue;
 
             // Only give way to a strictly higher-priority movement whose path
             // crosses ours. An OnLane car has no chosen turn yet, so assume its
