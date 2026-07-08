@@ -1,9 +1,6 @@
 using UnityEngine;
 using System.Collections.Generic;
 
-/// <summary>
-/// Main manager for the traffic simulation. Coordinates road generation and car spawning.
-/// </summary>
 public class SimulationManager : MonoBehaviour
 {
     [Header("Components")]
@@ -73,8 +70,7 @@ public class SimulationManager : MonoBehaviour
             if (roadVisualizer != null)
                 roadVisualizer.UpdateVisualization();
 
-            // (Re)build intersection management for the new network so stale
-            // state can never point at lanes that no longer exist
+            // Rebuilt per generation so stale state can't reference lanes that no longer exist
             intersectionManager = new IntersectionManager();
             intersectionManager.Initialize(roadMap, roadGenerator.GetConfig());
         }
@@ -99,10 +95,8 @@ public class SimulationManager : MonoBehaviour
             return;
         }
         
-        // Clear existing cars
         ClearCars();
         
-        // Get all available lanes
         List<Lane> allLanes = roadMap.GetAllLanes();
         
         if (allLanes.Count == 0)
@@ -111,41 +105,34 @@ public class SimulationManager : MonoBehaviour
             return;
         }
         
-        // Get intersection detection distance from config
-        float intersectionDetectionDistance = 15f; // Default
+        float intersectionDetectionDistance = 15f;
         if (roadGenerator != null && roadGenerator.GetConfig() != null)
         {
             intersectionDetectionDistance = roadGenerator.GetConfig().IntersectionDetectionDistance;
         }
         
-        // Spawn cars with random placement
         int carsSpawned = 0;
-        int maxAttempts = numberOfCars * 10; // Prevent infinite loop
+        int maxAttempts = numberOfCars * 10; // cap attempts in case lanes can't fit all cars
         int attempts = 0;
         
         while (carsSpawned < numberOfCars && attempts < maxAttempts)
         {
             attempts++;
             
-            // Pick random lane
             Lane randomLane = allLanes[Random.Range(0, allLanes.Count)];
             
-            // Calculate safe spawn range (avoid spawning too close to intersection)
+            // Keep the spawn point clear of the intersection zone at the lane's end
             float maxSpawnDistance = randomLane.Length - intersectionDetectionDistance - 5f;
             if (maxSpawnDistance < 5f)
             {
-                // Lane too short, skip
                 continue;
             }
             
-            // Pick random position along lane (avoiding intersection zone)
             float randomDistance = Random.Range(0f, maxSpawnDistance);
             
-            // Check if position is too close to other cars
             if (IsPositionTooClose(randomLane, randomDistance))
                 continue;
             
-            // Spawn car
             GameObject carObj = Instantiate(carPrefab, transform);
             CarController car = carObj.GetComponent<CarController>();
             
@@ -156,7 +143,6 @@ public class SimulationManager : MonoBehaviour
                 break;
             }
             
-            // Initialize car
             car.Initialize(nextCarID++, randomLane, randomDistance, this);
             activeCars.Add(car);
             
@@ -178,14 +164,10 @@ public class SimulationManager : MonoBehaviour
         activeCars.Clear();
         nextCarID = 0;
 
-        // Destroyed cars must not linger in intersection queues/crossings -
-        // stale references would permanently block their lanes
+        // Stale car references in intersection queues would permanently block their lanes
         intersectionManager?.ResetCarState();
     }
     
-    /// <summary>
-    /// Check if a spawn position is too close to existing cars.
-    /// </summary>
     private bool IsPositionTooClose(Lane lane, float distance)
     {
         foreach (var car in activeCars)
@@ -193,7 +175,6 @@ public class SimulationManager : MonoBehaviour
             if (car == null)
                 continue;
             
-            // Check if car is on same lane
             if (car.CurrentLane == lane)
             {
                 float existingCarDistance = Vector3.Distance(
@@ -209,9 +190,6 @@ public class SimulationManager : MonoBehaviour
         return false;
     }
     
-    /// <summary>
-    /// Get all active cars (for collision detection).
-    /// </summary>
     public List<CarController> GetAllCars()
     {
         return activeCars;

@@ -21,50 +21,33 @@ public class RoadNetworkGenerator : MonoBehaviour
 
         roadMap = new RoadMap();
         
-        // Initialize random with seed
         int seed = config.RandomSeed == 0 ? System.Environment.TickCount : config.RandomSeed;
         roadMap.RandomSeed = seed;
         random = new System.Random(seed);
         
         Debug.Log($"Generating road network with seed: {seed}");
 
-        // Step 1: Create grid nodes with jitter
         CreateGridNodes();
-        
-        // Step 2: Build road topology (connections only, no geometry yet)
+
         List<RoadConnection> connections = CreateRoadConnections();
-        
-        // Step 2.5: Randomly remove nodes and roads for organic variation
+
         RemoveRandomNodes();
         connections = RemoveInvalidConnections(connections);
         connections = RemoveRandomRoads(connections);
         connections = RemoveDeadEndNodes(connections);
-        
-        // Step 2.6: Remove roads that meet at very sharp angles (< 20 degrees)
+
         connections = RemoveSharpAngleRoads(connections);
 
-        // Step 2.65: Final width-aware repair. The earlier passes only reject some
-        // road categories and give up when their connectivity gate blocks a removal,
-        // so at high jitter the graph can still contain "impossible" geometry: sub-20°
-        // spikes at a node, roads grazing an unrelated intersection, and un-bridgeable
-        // at-grade crossings. This sweep removes what remains, guaranteeing the final
-        // network is clean (guarded so it never disconnects the graph).
         connections = ValidateAndRepairTopology(connections);
 
-        // Step 2.7: Create bridges for remaining crossings (after all removals)
         CreateBridges(connections);
-        
-        // Step 3: Analyze all intersections and calculate stop distances
+
         Dictionary<(int, int), float> stopDistances = CalculateAllStopDistances(connections);
-        
-        // Step 4: Create roads with lanes using pre-computed stop distances
+
         CreateRoadsWithLanes(connections, stopDistances);
-        
-        // Step 5: Precompute turn curves
+
         PrecomputeTurnCurves();
 
-        // Step 5.5: Reshape opposite left-turn arcs that overlap at skewed
-        // intersections, so the conflict map lets both lefts share a green
         FlattenOverlappingOppositeLeftTurns();
 
         Debug.Log($"Generated road network: {roadMap.Nodes.Count} nodes, {roadMap.Roads.Count} roads");
@@ -76,14 +59,11 @@ public class RoadNetworkGenerator : MonoBehaviour
     {
         int nodeId = 0;
         
-        // NOTE: Small grids (3x3) with high jitter (>5) may cause lane overlap at intersections
-        // due to wrap-around distance limitations. Use 4x4+ grids for jitter values above 5.
-        
-        // Calculate grid positions with consistent spacing for more regular appearance
+        // Small grids (3x3) with high jitter (>5) can overlap lanes at intersections via
+        // wrap-around; use 4x4+ grids for jitter values above 5.
         float[] xPositions = new float[config.GridWidth];
         float[] zPositions = new float[config.GridHeight];
         
-        // Use average spacing with small variation per segment
         float avgSpacingX = (config.MinSegmentLength + config.MaxSegmentLength) * 0.5f;
         float avgSpacingZ = (config.MinSegmentLength + config.MaxSegmentLength) * 0.5f;
         
@@ -91,7 +71,6 @@ public class RoadNetworkGenerator : MonoBehaviour
         for (int x = 0; x < config.GridWidth; x++)
         {
             xPositions[x] = currentX;
-            // Add small variation (20% of range) to spacing
             float variation = (config.MaxSegmentLength - config.MinSegmentLength) * 0.2f;
             currentX += avgSpacingX + RandomRange(-variation, variation);
         }
@@ -104,12 +83,11 @@ public class RoadNetworkGenerator : MonoBehaviour
             currentZ += avgSpacingZ + RandomRange(-variation, variation);
         }
         
-        // Create nodes at grid positions with reduced jitter (50% of configured value)
         for (int x = 0; x < config.GridWidth; x++)
         {
             for (int z = 0; z < config.GridHeight; z++)
             {
-                // Apply reduced jitter for more regular grid
+                // Half the configured jitter, for a more regular-looking grid.
                 float jitterX = RandomRange(-config.IntersectionJitter, config.IntersectionJitter) * 0.5f;
                 float jitterZ = RandomRange(-config.IntersectionJitter, config.IntersectionJitter) * 0.5f;
                 
@@ -155,8 +133,8 @@ public class RoadNetworkGenerator : MonoBehaviour
 
                 bool isWrapAround = (nextX == 0 && x == config.GridWidth - 1);
 
-                // Wrap-around roads span the whole grid, so like diagonals they
-                // must not pass through unrelated intersections
+                // Wrap-around roads span the whole grid, so (like diagonals) they must
+                // not pass through unrelated intersections.
                 bool wrapAcceptable = !isWrapAround ||
                     (IsReasonableWrapDistance(current, next) && !PassesTooCloseToNodes(current, next, grid));
 
@@ -164,7 +142,6 @@ public class RoadNetworkGenerator : MonoBehaviour
                 {
                     RoadConnection conn = new RoadConnection(roadId++, current, next);
 
-                    // Check for crossing and try to create bridge or reject
                     bool canAdd = TryHandleRoadCrossing(ref conn, tempConnections);
 
                     if (canAdd)
@@ -202,7 +179,6 @@ public class RoadNetworkGenerator : MonoBehaviour
                 {
                     RoadConnection conn = new RoadConnection(roadId++, current, next);
 
-                    // Check for crossing and try to create bridge or reject
                     bool canAdd = TryHandleRoadCrossing(ref conn, tempConnections);
 
                     if (canAdd)
@@ -261,7 +237,6 @@ public class RoadNetworkGenerator : MonoBehaviour
             if (PassesTooCloseToNodes(node1, node2, grid))
                 continue;
             
-            // Check if this diagonal would create sharp angles at either endpoint
             if (WouldCreateSharpAngle(node1, node2, newConnections, MIN_ANGLE_DEGREES) ||
                 WouldCreateSharpAngle(node2, node1, newConnections, MIN_ANGLE_DEGREES))
                 continue;
@@ -312,7 +287,6 @@ public class RoadNetworkGenerator : MonoBehaviour
     
     private bool PassesTooCloseToNodes(Node start, Node end, Node[,] grid)
     {
-        // Check if the line from start to end passes too close to any other node
         float minDistance = config.MinDistanceFromIntersection;
         
         for (int x = 0; x < config.GridWidth; x++)
@@ -321,16 +295,14 @@ public class RoadNetworkGenerator : MonoBehaviour
             {
                 Node node = grid[x, z];
                 
-                // Skip the endpoints of the diagonal
                 if (node == start || node == end)
                     continue;
-                
-                // Calculate distance from node to line segment
+
                 float distToSegment = DistanceFromPointToLineSegment(node.Position, start.Position, end.Position);
-                
+
                 if (distToSegment < minDistance)
                 {
-                    return true; // Too close
+                    return true;
                 }
             }
         }
@@ -340,25 +312,20 @@ public class RoadNetworkGenerator : MonoBehaviour
     
     private float DistanceFromPointToLineSegment(Vector3 point, Vector3 lineStart, Vector3 lineEnd)
     {
-        // Calculate distance from point to line segment on XZ plane
         Vector3 lineDir = lineEnd - lineStart;
         float lineLength = lineDir.magnitude;
-        
+
         if (lineLength < 0.001f)
             return Vector3.Distance(point, lineStart);
-        
+
         lineDir /= lineLength;
-        
-        // Project point onto line
+
         float t = Vector3.Dot(point - lineStart, lineDir);
-        
-        // Clamp to segment
         t = Mathf.Clamp(t, 0f, lineLength);
-        
-        // Find closest point on segment
+
         Vector3 closestPoint = lineStart + lineDir * t;
-        
-        // Return XZ distance (ignore Y)
+
+        // XZ-only distance - height differences (bridges, slopes) shouldn't affect proximity checks.
         Vector3 diff = point - closestPoint;
         diff.y = 0;
         return diff.magnitude;
@@ -379,8 +346,7 @@ public class RoadNetworkGenerator : MonoBehaviour
     
     private bool IsReasonableWrapDistance(Node from, Node to)
     {
-        // Check if a wrap-around connection distance is reasonable
-        // If nodes have shifted too much due to jitter, wrap-around creates very long roads
+        // Jitter can push wrap-around nodes far enough apart to create absurdly long roads.
         float distance = Vector3.Distance(from.Position, to.Position);
         float maxReasonableDistance = config.MaxSegmentLength * 1.5f;
         
@@ -389,75 +355,67 @@ public class RoadNetworkGenerator : MonoBehaviour
     
     private bool TryHandleRoadCrossing(ref RoadConnection newConn, List<RoadConnection> existingConnections)
     {
-        // Check if this road would cross any existing roads
-        // NOTE: We don't create bridges here - that happens later after all removals
+        // Bridges aren't built here; this only validates that a bridge could be built
+        // later, once all removal passes are done.
         Vector3 p1 = newConn.StartNode.Position;
         Vector3 p2 = newConn.EndNode.Position;
-        
-        // Find ALL crossings
+
         foreach (var existingConn in existingConnections)
         {
-            // Skip if roads share a node
             if (existingConn.StartNode == newConn.StartNode || existingConn.StartNode == newConn.EndNode ||
                 existingConn.EndNode == newConn.StartNode || existingConn.EndNode == newConn.EndNode)
             {
                 continue;
             }
-            
+
             Vector3 p3 = existingConn.StartNode.Position;
             Vector3 p4 = existingConn.EndNode.Position;
-            
+
             if (LineSegmentsIntersect(p1, p2, p3, p4, out Vector3 crossingPoint))
             {
-                // Roads cross - check if we CAN create a bridge (when bridges are created later)
                 if (!config.EnableBridges || !CanCreateBridge(newConn, existingConn, crossingPoint))
                 {
-                    return false; // Cannot create bridge, reject road
+                    return false;
                 }
-                // Don't create bridge yet - just validate that it's possible
             }
         }
-        
-        return true; // All crossings can be bridged, road is valid
+
+        return true;
     }
     
     private bool CanCreateBridge(RoadConnection newConn, RoadConnection existingConn, Vector3 crossingPoint)
     {
-        // Check condition 1: Not too close to intersections
         float distToStart = Vector3.Distance(newConn.StartNode.Position, crossingPoint);
         float distToEnd = Vector3.Distance(newConn.EndNode.Position, crossingPoint);
-        
+
         if (distToStart < config.MinDistanceFromIntersection || distToEnd < config.MinDistanceFromIntersection)
         {
-            return false; // Too close to intersection
+            return false;
         }
-        
-        // Check condition 2: Crossing angle not too shallow
+
         Vector3 dir1 = (newConn.EndNode.Position - newConn.StartNode.Position).normalized;
         Vector3 dir2 = (existingConn.EndNode.Position - existingConn.StartNode.Position).normalized;
-        
+
         float dot = Mathf.Abs(Vector3.Dot(dir1, dir2));
         float angleDegrees = Mathf.Acos(Mathf.Clamp(dot, 0f, 1f)) * Mathf.Rad2Deg;
-        
+
         if (angleDegrees < config.MinBridgeCrossingAngle)
         {
-            return false; // Angle too shallow
+            return false;
         }
-        
-        // Check condition 3: Road long enough for smooth ramp
+
         float requiredLength = config.MinBridgeRampLength * 2f;
-        
+
         if (distToStart < config.MinBridgeRampLength || distToEnd < config.MinBridgeRampLength)
         {
-            return false; // Not enough room for ramps
+            return false;
         }
-        
+
         return true;
     }
     
     private void CreateBridges(List<RoadConnection> connections)
     {
-        // After all removals, create bridges for all remaining road crossings
         if (!config.EnableBridges)
             return;
         
@@ -469,26 +427,24 @@ public class RoadNetworkGenerator : MonoBehaviour
             Vector3 p1 = conn.StartNode.Position;
             Vector3 p2 = conn.EndNode.Position;
             
-            // Check against all other roads (only check j > i to avoid duplicate bridge creation)
+            // j > i avoids checking (and possibly bridging) each pair twice.
             for (int j = i + 1; j < connections.Count; j++)
             {
                 RoadConnection other = connections[j];
-                
-                // Skip if roads share a node
+
                 if (other.StartNode == conn.StartNode || other.StartNode == conn.EndNode ||
                     other.EndNode == conn.StartNode || other.EndNode == conn.EndNode)
                 {
                     continue;
                 }
-                
+
                 Vector3 p3 = other.StartNode.Position;
                 Vector3 p4 = other.EndNode.Position;
-                
+
                 if (LineSegmentsIntersect(p1, p2, p3, p4, out Vector3 crossingPoint))
                 {
-                    // Roads cross - bridge whichever of the two has room for
-                    // ramps; validating only one side let crossings slip
-                    // through with no bridge at all (flat lane overlap)
+                    // Bridge whichever side has room for ramps; validating only one side
+                    // let some crossings through with no bridge at all (flat lane overlap).
                     if (CanCreateBridge(conn, other, crossingPoint))
                     {
                         AddBridge(ref conn, crossingPoint);
@@ -517,21 +473,17 @@ public class RoadNetworkGenerator : MonoBehaviour
     
     private void AddBridge(ref RoadConnection conn, Vector3 crossingPoint)
     {
-        // Calculate distances
         float distFromStart = Vector3.Distance(conn.StartNode.Position, crossingPoint);
         float distFromEnd = Vector3.Distance(conn.EndNode.Position, crossingPoint);
-        
-        // Use configured ramp length
+
         float rampLength = config.MinBridgeRampLength;
-        
-        // Create bridge that spans from (crossing - rampLength) to (crossing + rampLength)
+
         float startDist = distFromStart - rampLength;
         float endDist = distFromStart + rampLength;
-        
-        // Ensure we don't go beyond road bounds
+
         startDist = Mathf.Max(0f, startDist);
         endDist = Mathf.Min(conn.Length, endDist);
-        
+
         BridgeInfo bridge = new BridgeInfo(
             crossingPoint,
             startDist,
@@ -540,9 +492,8 @@ public class RoadNetworkGenerator : MonoBehaviour
             rampLength
         );
 
-        // Add bridge to the list, merging overlapping intervals: Lane SUMS the
-        // elevation of every bridge, so stacked intervals would produce
-        // double-height lumps with slope kinks
+        // Merge overlapping bridge intervals - Lane sums elevation across all its
+        // bridges, so overlapping intervals would double-stack height.
         conn.Bridges.Add(bridge);
         ConsolidateBridges(conn.Bridges);
     }
@@ -575,11 +526,9 @@ public class RoadNetworkGenerator : MonoBehaviour
         
         foreach (var conn in connections)
         {
-            // Calculate stop distance at start node
             float stopDistStart = CalculateStopDistanceAtNode(conn.StartNode, conn.EndNode, connections);
             stopDistances[(conn.ID, conn.StartNode.ID)] = stopDistStart;
-            
-            // Calculate stop distance at end node
+
             float stopDistEnd = CalculateStopDistanceAtNode(conn.EndNode, conn.StartNode, connections);
             stopDistances[(conn.ID, conn.EndNode.ID)] = stopDistEnd;
         }
@@ -589,17 +538,14 @@ public class RoadNetworkGenerator : MonoBehaviour
     
     private float CalculateStopDistanceAtNode(Node atNode, Node towardNode, List<RoadConnection> connections)
     {
-        // Calculate required stop line distance based on sharpest angle at this node
-        // Uses full network knowledge to compute symmetric adjustments
-        
+        // Widens the setback for sharp angles at this node; using the full connection list
+        // (not just this road) keeps both ends of an intersection symmetric.
         float baseDistance = config.StopLineDistance;
-        
-        // Direction of this road
+
         Vector3 thisRoadDir = (towardNode.Position - atNode.Position).normalized;
-        
+
         float minAngleDegrees = 180f; // Start with straight (180°)
-        
-        // Check angle with all OTHER connections at this node
+
         foreach (var conn in connections)
         {
             Vector3 otherDir;
@@ -622,42 +568,34 @@ public class RoadNetworkGenerator : MonoBehaviour
             {
                 continue; // Connection doesn't involve this node
             }
-            
-            // Calculate angle between roads
+
             float dot = Vector3.Dot(thisRoadDir, otherDir);
             float angleDegrees = Mathf.Acos(Mathf.Clamp(dot, -1f, 1f)) * Mathf.Rad2Deg;
-            
+
             minAngleDegrees = Mathf.Min(minAngleDegrees, angleDegrees);
         }
-        
-        // Dynamically calculate stop line distance based on angle to prevent lane overlap
-        // Using geometric formula: distance = (roadWidth / 2) / tan(angle / 2)
-        // This ensures lanes don't overlap even at very sharp angles
+
+        // Geometric setback so lanes don't overlap at sharp angles: distance = (roadWidth / 2) / tan(angle / 2).
         if (minAngleDegrees < 90f)
         {
-            // Total road width (both lanes)
             float roadWidth = config.LaneWidth * 2f;
-            
-            // Convert to radians
+
             float angleRadians = minAngleDegrees * Mathf.Deg2Rad;
-            
-            // Calculate required distance using geometry
-            // Add modest safety margin of 1.15x to account for turn curves
+
+            // 1.15x safety margin accounts for turn curves.
             float halfAngle = angleRadians / 2f;
             float geometricDistance = (roadWidth / 2f) / Mathf.Tan(halfAngle);
             float requiredDistance = geometricDistance * 1.15f;
-            
-            // Cap the cutback at the requirement for the sharpest angle the
-            // pipeline permits (20°, per RemoveSharpAngleRoads and diagonal
-            // placement). A fixed low cap left 20-37° intersections with
-            // overlapping lanes; road length is clamped in CreateRoadsWithLanes.
+
+            // Cap at the requirement for the sharpest angle the pipeline allows (20°,
+            // matching RemoveSharpAngleRoads); a lower fixed cap left 20-37° intersections
+            // with overlapping lanes.
             float maxCutoff = (roadWidth / 2f) / Mathf.Tan(20f * 0.5f * Mathf.Deg2Rad) * 1.15f;
             requiredDistance = Mathf.Min(requiredDistance, maxCutoff);
-            
-            // Use the larger of base distance or calculated distance
+
             return Mathf.Max(baseDistance, requiredDistance);
         }
-        
+
         return baseDistance;
     }
     
@@ -696,10 +634,9 @@ public class RoadNetworkGenerator : MonoBehaviour
     private bool LineSegmentsIntersect(Vector3 p1, Vector3 p2, Vector3 p3, Vector3 p4, out Vector3 crossingPoint)
     {
         crossingPoint = Vector3.zero;
-        
-        // Check if two line segments intersect on the XZ plane
-        // Using parametric line segment intersection test
-        
+
+        // Parametric segment intersection on the XZ plane; height is ignored (bridges
+        // cross at different Y).
         float x1 = p1.x, z1 = p1.z;
         float x2 = p2.x, z2 = p2.z;
         float x3 = p3.x, z3 = p3.z;
@@ -714,14 +651,12 @@ public class RoadNetworkGenerator : MonoBehaviour
         float t = ((x1 - x3) * (z3 - z4) - (z1 - z3) * (x3 - x4)) / denominator;
         float u = -((x1 - x2) * (z1 - z3) - (z1 - z2) * (x1 - x3)) / denominator;
         
-        // Intersection occurs if both t and u are between 0 and 1
-        // Use small epsilon to avoid rejecting roads that barely touch at endpoints
+        // Small epsilon avoids rejecting roads that barely touch at endpoints.
         const float epsilon = 0.01f;
         bool intersects = (t > epsilon && t < (1.0f - epsilon) && u > epsilon && u < (1.0f - epsilon));
         
         if (intersects)
         {
-            // Calculate crossing point
             crossingPoint = Vector3.Lerp(p1, p2, t);
         }
         
@@ -730,10 +665,8 @@ public class RoadNetworkGenerator : MonoBehaviour
 
     private void PrecomputeTurnCurves()
     {
-        // For each node (intersection), find all possible turns
         foreach (Node node in roadMap.Nodes)
         {
-            // Get all lanes ending at this node
             List<Lane> incomingLanes = new List<Lane>();
             List<Lane> outgoingLanes = new List<Lane>();
             
@@ -749,11 +682,10 @@ public class RoadNetworkGenerator : MonoBehaviour
                     outgoingLanes.Add(road.BackwardLane);
             }
             
-            // Check if this is a trivial intersection (only 2 roads)
-            // Trivial intersections must allow their only turn regardless of angle
+            // Trivial (2-road) intersections must allow their only turn, even if it's
+            // sharper than the normal minimum.
             bool isTrivial = node.IsTrivialIntersection();
-            
-            // Create turn curves for all valid combinations (excluding U-turns and sharp turns)
+
             foreach (Lane inLane in incomingLanes)
             {
                 Lane bestFallback = null;
@@ -761,12 +693,9 @@ public class RoadNetworkGenerator : MonoBehaviour
 
                 foreach (Lane outLane in outgoingLanes)
                 {
-                    // Prevent U-turn (going back on the same road)
                     if (IsUTurn(inLane, outLane))
                         continue;
 
-                    // Prevent turns that are too sharp (< 40 degrees)
-                    // EXCEPT for trivial intersections where this is the only path
                     if (!isTrivial && IsTurnTooSharp(inLane, outLane))
                     {
                         // Remember the least-sharp rejected turn as a fallback
@@ -783,9 +712,8 @@ public class RoadNetworkGenerator : MonoBehaviour
                     inLane.AvailableTurns.Add(curve);
                 }
 
-                // A lane with no exits strands cars at its end forever and
-                // permanently blocks everyone behind them - keep the least-sharp
-                // turn even when it violates the sharpness limit
+                // A lane with no exits strands cars at its end forever and blocks everyone
+                // behind them - keep the least-sharp turn even if it breaks the sharpness limit.
                 if (inLane.AvailableTurns.Count == 0 && bestFallback != null)
                 {
                     inLane.AvailableTurns.Add(new TurnCurve(inLane, bestFallback, config.TurnRadius));
@@ -797,13 +725,9 @@ public class RoadNetworkGenerator : MonoBehaviour
 
     private void FlattenOverlappingOppositeLeftTurns()
     {
-        // Opposite-approach left turns both bow through the central region of an
-        // intersection; at skewed nodes the two arcs can cross or pass closer than
-        // a car body, and the conflict map then (correctly) serializes the pair.
-        // Pulling both control points toward their chords by the same factor
-        // separates the arcs so both lefts can cross on the same green. Pairs that
-        // cannot be separated without degenerating into a near-straight diagonal
-        // are restored and left serialized.
+        // Opposite-approach left arcs can cross at skewed nodes, forcing the conflict map
+        // to serialize them; pull both control points toward their chords until they clear,
+        // leaving pairs that can't clear without degenerating into a near-straight diagonal serialized.
         const float oppositeApproachMaxDot = -0.5f; // approaches at least ~120° apart
         const float triggerClearance = 2.0f;        // car width: closer than this, bodies overlap
         const float targetClearance = 2.5f;         // flatten until bodies clear with margin
@@ -826,9 +750,9 @@ public class RoadNetworkGenerator : MonoBehaviour
                     TurnCurve a = leftTurns[i];
                     TurnCurve b = leftTurns[j];
 
-                    // Same-lane turns are serialized by queue order, and turns
-                    // merging into the same lane can never be separated (shared
-                    // end point) - the conflict map handles both
+                    // Same-lane turns already serialize by queue order; turns merging into
+                    // the same lane share an endpoint and can never be separated - the
+                    // conflict map handles both.
                     if (a.FromLane == b.FromLane || a.ToLane == b.ToLane)
                         continue;
                     if (Vector3.Dot(a.FromLane.GetDirection(), b.FromLane.GetDirection()) > oppositeApproachMaxDot)
@@ -917,8 +841,7 @@ public class RoadNetworkGenerator : MonoBehaviour
 
     private bool SegmentsIntersect2D(Vector3 p1, Vector3 p2, Vector3 p3, Vector3 p4)
     {
-        // Endpoint touches count as intersections, matching the inclusive test
-        // in IntersectionManager.LineSegmentsIntersect2D
+        // Endpoint touches count as intersections, matching IntersectionManager.LineSegmentsIntersect2D.
         float denom = (p1.x - p2.x) * (p3.z - p4.z) - (p1.z - p2.z) * (p3.x - p4.x);
 
         if (Mathf.Abs(denom) < 0.0001f)
@@ -947,17 +870,13 @@ public class RoadNetworkGenerator : MonoBehaviour
 
     private bool IsUTurn(Lane inLane, Lane outLane)
     {
-        // Check if the outgoing lane goes back to where the incoming lane came from
         return outLane.EndNode == inLane.StartNode;
     }
-    
+
     private bool IsTurnTooSharp(Lane inLane, Lane outLane)
     {
-        // Check if the turn angle is too sharp (> 140 degrees turn required)
-        // This corresponds to roads meeting at < 40 degrees
-        const float MAX_TURN_ANGLE = 140f; // degrees
+        const float MAX_TURN_ANGLE = 140f; // corresponds to roads meeting at < 40°
 
-        // Sharp turn = large angle change (close to 180° = U-turn)
         return TurnAngleDegrees(inLane, outLane) > MAX_TURN_ANGLE;
     }
 
@@ -985,8 +904,7 @@ public class RoadNetworkGenerator : MonoBehaviour
             for (int z = 0; z < config.GridHeight; z++)
             {
                 grid[x, z] = roadMap.Nodes[index++];
-                
-                // Mark border nodes
+
                 if (x == 0 || x == config.GridWidth - 1 || z == 0 || z == config.GridHeight - 1)
                 {
                     borderNodes.Add(grid[x, z]);
@@ -994,7 +912,6 @@ public class RoadNetworkGenerator : MonoBehaviour
             }
         }
         
-        // Get interior nodes that can be removed
         List<Node> removableNodes = new List<Node>();
         foreach (Node node in roadMap.Nodes)
         {
@@ -1004,10 +921,8 @@ public class RoadNetworkGenerator : MonoBehaviour
             }
         }
         
-        // Calculate how many to remove
         int nodesToRemove = Mathf.RoundToInt(removableNodes.Count * config.NodeRemovalPercentage / 100f);
-        
-        // Randomly select and remove nodes
+
         for (int i = 0; i < nodesToRemove && removableNodes.Count > 0; i++)
         {
             int randomIndex = random.Next(removableNodes.Count);
@@ -1022,7 +937,6 @@ public class RoadNetworkGenerator : MonoBehaviour
     
     private List<RoadConnection> RemoveInvalidConnections(List<RoadConnection> connections)
     {
-        // Remove connections that reference deleted nodes
         List<RoadConnection> validConnections = new List<RoadConnection>();
         
         foreach (var conn in connections)
@@ -1042,7 +956,6 @@ public class RoadNetworkGenerator : MonoBehaviour
         if (config.RoadRemovalPercentage <= 0 || connections.Count == 0)
             return connections;
         
-        // Calculate how many roads to try removing
         int roadsToRemove = Mathf.RoundToInt(connections.Count * config.RoadRemovalPercentage / 100f);
         
         List<RoadConnection> mutableConnections = new List<RoadConnection>(connections);
@@ -1053,8 +966,7 @@ public class RoadNetworkGenerator : MonoBehaviour
         {
             int randomIndex = random.Next(mutableConnections.Count);
             RoadConnection candidate = mutableConnections[randomIndex];
-            
-            // Test if network stays valid without this road
+
             List<RoadConnection> testConnections = new List<RoadConnection>(mutableConnections);
             testConnections.RemoveAt(randomIndex);
             
@@ -1072,7 +984,6 @@ public class RoadNetworkGenerator : MonoBehaviour
     
     private bool AllNodesHaveMinimumDegree(List<RoadConnection> connections)
     {
-        // Count connections per node
         Dictionary<Node, int> nodeDegree = new Dictionary<Node, int>();
         
         foreach (Node node in roadMap.Nodes)
@@ -1088,12 +999,12 @@ public class RoadNetworkGenerator : MonoBehaviour
                 nodeDegree[conn.EndNode]++;
         }
         
-        // Check all nodes have at least 2 connections
+        // Every node needs at least 2 connections.
         foreach (var kvp in nodeDegree)
         {
             if (kvp.Value < 2)
             {
-                return false; // Node has fewer than 2 roads
+                return false;
             }
         }
         
@@ -1102,9 +1013,7 @@ public class RoadNetworkGenerator : MonoBehaviour
     
     private List<RoadConnection> RemoveDeadEndNodes(List<RoadConnection> connections)
     {
-        // Remove any nodes that have only 1 connection (dead ends)
-        // Keep iterating until no more dead ends exist
-        
+        // Repeats until no degree-1 (dead-end) nodes remain.
         List<RoadConnection> mutableConnections = new List<RoadConnection>(connections);
         bool removedAny = true;
         int totalRemoved = 0;
@@ -1112,14 +1021,13 @@ public class RoadNetworkGenerator : MonoBehaviour
         while (removedAny)
         {
             removedAny = false;
-            
-            // Count connections per node
+
             Dictionary<Node, int> nodeDegree = new Dictionary<Node, int>();
             foreach (Node node in roadMap.Nodes)
             {
                 nodeDegree[node] = 0;
             }
-            
+
             foreach (var conn in mutableConnections)
             {
                 if (nodeDegree.ContainsKey(conn.StartNode))
@@ -1127,8 +1035,7 @@ public class RoadNetworkGenerator : MonoBehaviour
                 if (nodeDegree.ContainsKey(conn.EndNode))
                     nodeDegree[conn.EndNode]++;
             }
-            
-            // Find and remove nodes with degree 1
+
             List<Node> deadEndNodes = new List<Node>();
             foreach (var kvp in nodeDegree)
             {
@@ -1140,14 +1047,12 @@ public class RoadNetworkGenerator : MonoBehaviour
             
             if (deadEndNodes.Count > 0)
             {
-                // Remove these nodes
                 foreach (Node node in deadEndNodes)
                 {
                     roadMap.Nodes.Remove(node);
                 }
-                
-                // Remove connections involving these nodes
-                mutableConnections.RemoveAll(conn => 
+
+                mutableConnections.RemoveAll(conn =>
                     deadEndNodes.Contains(conn.StartNode) || 
                     deadEndNodes.Contains(conn.EndNode));
                 
@@ -1166,7 +1071,6 @@ public class RoadNetworkGenerator : MonoBehaviour
     
     private List<RoadConnection> RemoveSharpAngleRoads(List<RoadConnection> connections)
     {
-        // Remove roads that meet at angles less than 20 degrees at intersections
         const float MIN_ANGLE_DEGREES = 20f;
         
         List<RoadConnection> mutableConnections = new List<RoadConnection>(connections);
@@ -1176,11 +1080,9 @@ public class RoadNetworkGenerator : MonoBehaviour
         while (removedAny)
         {
             removedAny = false;
-            
-            // Check each node for sharp angles between connected roads
+
             foreach (Node node in roadMap.Nodes)
             {
-                // Get all roads connected to this node
                 List<RoadConnection> connectedRoads = new List<RoadConnection>();
                 foreach (var conn in mutableConnections)
                 {
@@ -1194,34 +1096,29 @@ public class RoadNetworkGenerator : MonoBehaviour
                 if (connectedRoads.Count < 2)
                     continue;
                 
-                // Check all pairs of roads at this node
                 for (int i = 0; i < connectedRoads.Count; i++)
                 {
                     for (int j = i + 1; j < connectedRoads.Count; j++)
                     {
                         RoadConnection road1 = connectedRoads[i];
                         RoadConnection road2 = connectedRoads[j];
-                        
-                        // Get directions from the node
-                        Vector3 dir1 = road1.StartNode == node 
+
+                        Vector3 dir1 = road1.StartNode == node
                             ? (road1.EndNode.Position - node.Position).normalized
                             : (road1.StartNode.Position - node.Position).normalized;
-                        
+
                         Vector3 dir2 = road2.StartNode == node
                             ? (road2.EndNode.Position - node.Position).normalized
                             : (road2.StartNode.Position - node.Position).normalized;
-                        
-                        // Calculate angle
+
                         float dot = Vector3.Dot(dir1, dir2);
                         float angleDegrees = Mathf.Acos(Mathf.Clamp(dot, -1f, 1f)) * Mathf.Rad2Deg;
-                        
-                        // If angle is too sharp, remove one of the roads
+
                         if (angleDegrees < MIN_ANGLE_DEGREES)
                         {
-                            // Remove the shorter road to minimize impact
+                            // Remove the shorter road to minimize impact.
                             RoadConnection toRemove = road1.Length < road2.Length ? road1 : road2;
-                            
-                            // Check if removing this road would disconnect the network or create dead ends
+
                             List<RoadConnection> testConnections = new List<RoadConnection>(mutableConnections);
                             testConnections.Remove(toRemove);
                             
@@ -1254,22 +1151,17 @@ public class RoadNetworkGenerator : MonoBehaviour
     }
 
     /// <summary>
-    /// Final safety net that removes any remaining "impossible intersection" geometry
-    /// the earlier passes let through at high jitter:
-    ///   1. two roads meeting below the minimum angle at a shared node (a thin spike);
-    ///   2. a road whose centreline passes close enough to an unrelated node that its
-    ///      lanes overlap that intersection;
-    ///   3. two unrelated roads whose lanes overlap at grade and cannot be bridged.
-    /// Removals are guarded by a connectivity check (they may create dead-ends, which
-    /// are cleaned afterwards, but never disconnect the graph). Bridgeable crossings
-    /// are left untouched so genuine overpasses survive.
+    /// Safety net for "impossible intersection" geometry the earlier passes miss at high
+    /// jitter: sub-minimum-angle spikes at a node, roads grazing an unrelated node, and
+    /// unbridgeable at-grade overlaps between unrelated roads. Removals are guarded by a
+    /// connectivity check (dead-ends may result but are cleaned up after; the graph never
+    /// disconnects), and bridgeable crossings are left alone.
     /// </summary>
     private List<RoadConnection> ValidateAndRepairTopology(List<RoadConnection> connections)
     {
         const float MIN_ANGLE_DEGREES = 20f;
         float roadWidth = config.LaneWidth * 2f;
-        // A foreign node closer than this to a road centreline means the road's lanes
-        // cover that intersection.
+        // Foreign node closer than this means the road's lanes cover that intersection.
         float nodeClearance = roadWidth + config.LaneWidth * 0.5f;
         // Two unrelated road centrelines closer than this have overlapping lanes.
         float roadClearance = roadWidth * 0.9f;
@@ -1342,8 +1234,8 @@ public class RoadNetworkGenerator : MonoBehaviour
             }
         }
 
-        // Removals may have created dead-ends; clean them (subtractive only, so it
-        // cannot introduce new violations).
+        // Removals may have created dead-ends; clean them up (subtractive only, so this
+        // can't introduce new violations).
         conns = RemoveInvalidConnections(conns);
         conns = RemoveDeadEndNodes(conns);
         conns = RemoveInvalidConnections(conns);
@@ -1456,8 +1348,7 @@ public class RoadNetworkGenerator : MonoBehaviour
     {
         if (roadMap.Nodes.Count == 0 || connections.Count == 0)
             return false;
-        
-        // Build adjacency list
+
         Dictionary<Node, List<Node>> adjacency = new Dictionary<Node, List<Node>>();
         foreach (Node node in roadMap.Nodes)
         {
@@ -1498,7 +1389,6 @@ public class RoadNetworkGenerator : MonoBehaviour
             }
         }
         
-        // Network is connected if all nodes were visited
         return visited.Count == roadMap.Nodes.Count;
     }
     
@@ -1517,14 +1407,6 @@ public class RoadNetworkGenerator : MonoBehaviour
         return config;
     }
 
-    // ============================================================================
-    // EXPORT METHODS FOR PYTHON VISUALIZATION
-    // ============================================================================
-
-    /// <summary>
-    /// Export the road network to JSON file for Python visualization.
-    /// Right-click in Unity Inspector and select "Export Road Network to JSON" to use.
-    /// </summary>
     [ContextMenu("Export Road Network to JSON")]
     public void ExportToJSONFromContextMenu()
     {
@@ -1533,7 +1415,6 @@ public class RoadNetworkGenerator : MonoBehaviour
     }
 
     /// <summary>
-    /// Export the complete road network to a JSON file.
     /// Includes nodes, roads, lanes, bridges, and turn curves.
     /// </summary>
     public void ExportToJSON(string filePath)
@@ -1552,7 +1433,6 @@ public class RoadNetworkGenerator : MonoBehaviour
         export.Bridges = new List<BridgeExport>();
         export.TurnCurves = new List<TurnCurveExport>();
 
-        // Export nodes
         foreach (Node node in roadMap.Nodes)
         {
             NodeExport ne = new NodeExport
@@ -1572,7 +1452,6 @@ public class RoadNetworkGenerator : MonoBehaviour
             export.Nodes.Add(ne);
         }
 
-        // Export roads and lanes
         int turnCurveID = 0;
         foreach (Road road in roadMap.Roads)
         {
@@ -1587,11 +1466,9 @@ public class RoadNetworkGenerator : MonoBehaviour
             };
             export.Roads.Add(re);
 
-            // Export forward lane and its turn curves
             export.Lanes.Add(ExportLane(road.ForwardLane, export.Bridges));
             turnCurveID = ExportLaneTurnCurves(road.ForwardLane, export.TurnCurves, turnCurveID);
 
-            // Export backward lane and its turn curves
             export.Lanes.Add(ExportLane(road.BackwardLane, export.Bridges));
             turnCurveID = ExportLaneTurnCurves(road.BackwardLane, export.TurnCurves, turnCurveID);
         }
@@ -1600,7 +1477,6 @@ public class RoadNetworkGenerator : MonoBehaviour
 
         try
         {
-            // Ensure directory exists
             string directory = System.IO.Path.GetDirectoryName(filePath);
             if (!System.IO.Directory.Exists(directory))
             {
@@ -1640,12 +1516,11 @@ public class RoadNetworkGenerator : MonoBehaviour
             AvailableTurnIDs = new List<int>()
         };
 
-        // Export bridges (deduplicated - same bridge object shared by both lanes)
+        // Deduplicated - the same bridge object is shared by both lanes of a road.
         if (lane.Bridges != null && lane.Bridges.Count > 0)
         {
             foreach (var bridge in lane.Bridges)
             {
-                // Check if this bridge was already exported
                 int existingIndex = -1;
                 for (int i = 0; i < bridges.Count; i++)
                 {
@@ -1661,12 +1536,10 @@ public class RoadNetworkGenerator : MonoBehaviour
 
                 if (existingIndex >= 0)
                 {
-                    // Bridge already exported, just reference it
                     le.BridgeIndices.Add(existingIndex);
                 }
                 else
                 {
-                    // Export new bridge
                     int bridgeIndex = bridges.Count;
                     bridges.Add(new BridgeExport
                     {

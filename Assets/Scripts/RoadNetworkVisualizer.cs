@@ -1,8 +1,5 @@
 using UnityEngine;
 
-/// <summary>
-/// Visualizes the road network using Unity Gizmos for debugging.
-/// </summary>
 [RequireComponent(typeof(RoadNetworkGenerator))]
 public class RoadNetworkVisualizer : MonoBehaviour
 {
@@ -101,11 +98,9 @@ public class RoadNetworkVisualizer : MonoBehaviour
         Gizmos.color = laneColor;
         foreach (Road road in roadMap.Roads)
         {
-            // Forward lane
             DrawLaneWithBridge(road.ForwardLane);
             DrawArrow(road.ForwardLane.StartPosition, road.ForwardLane.EndPosition, 2f);
             
-            // Backward lane
             DrawLaneWithBridge(road.BackwardLane);
             DrawArrow(road.BackwardLane.StartPosition, road.BackwardLane.EndPosition, 2f);
         }
@@ -115,12 +110,10 @@ public class RoadNetworkVisualizer : MonoBehaviour
     {
         if (lane.Bridges == null || lane.Bridges.Count == 0)
         {
-            // No bridge - draw simple line
             Gizmos.DrawLine(lane.StartPosition, lane.EndPosition);
         }
         else
         {
-            // Has bridges - draw segmented curve
             int segments = 20;
             Vector3 prevPoint = lane.GetPositionAtDistance(0f);
             float prevDistance = 0f;
@@ -130,19 +123,17 @@ public class RoadNetworkVisualizer : MonoBehaviour
                 float distance = (i / (float)segments) * lane.Length;
                 Vector3 point = lane.GetPositionAtDistance(distance);
                 
-                // Check if segment is above floor level (on a bridge)
-                // Use average Y of both points for segment color
                 float avgY = (prevPoint.y + point.y) * 0.5f;
                 float floorHeight = generator?.GetConfig()?.FloorHeight ?? 0f;
-                bool isOnBridge = avgY > floorHeight + 0.1f; // 0.1 tolerance for floating point
+                bool isOnBridge = avgY > floorHeight + 0.1f; // slack to avoid float noise at floor height
                 
                 if (isOnBridge)
                 {
-                    Gizmos.color = Color.magenta; // Bridge segments in magenta
+                    Gizmos.color = Color.magenta;
                 }
                 else
                 {
-                    Gizmos.color = laneColor; // Normal lane color
+                    Gizmos.color = laneColor;
                 }
                 
                 Gizmos.DrawLine(prevPoint, point);
@@ -150,7 +141,6 @@ public class RoadNetworkVisualizer : MonoBehaviour
                 prevDistance = distance;
             }
             
-            // Reset color
             Gizmos.color = laneColor;
         }
     }
@@ -169,7 +159,6 @@ public class RoadNetworkVisualizer : MonoBehaviour
     {
         foreach (TurnCurve curve in lane.AvailableTurns)
         {
-            // Color-code by turn type
             switch (curve.Type)
             {
                 case TurnCurve.TurnType.Straight:
@@ -183,7 +172,6 @@ public class RoadNetworkVisualizer : MonoBehaviour
                     break;
             }
             
-            // Draw curve with multiple segments
             int segments = 15;
             Vector3 prevPoint = curve.GetPointOnCurve(0f);
             
@@ -204,12 +192,10 @@ public class RoadNetworkVisualizer : MonoBehaviour
             
         foreach (Node node in roadMap.Nodes)
         {
-            // Only draw for intersections that actually have traffic lights
             if (!simulationManager.IntersectionManager.HasTrafficLight(node)) continue;
             
             foreach (Road road in node.ConnectedRoads)
             {
-                // Check lanes ending at this node
                 CheckAndDrawLight(node, road.ForwardLane);
                 CheckAndDrawLight(node, road.BackwardLane);
             }
@@ -232,7 +218,6 @@ public class RoadNetworkVisualizer : MonoBehaviour
         
         Gizmos.color = lightColor;
         
-        // Draw sphere at end of lane (slightly elevated)
         Vector3 pos = lane.EndPosition + Vector3.up * 2f;
         Gizmos.DrawSphere(pos, trafficLightSize);
     }

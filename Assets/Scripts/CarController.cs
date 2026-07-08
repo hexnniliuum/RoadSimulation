@@ -1,9 +1,5 @@
 using UnityEngine;
 
-/// <summary>
-/// Controls individual car behavior: movement along lanes, speed control, and pathfinding.
-/// Cars follow lanes and turn curves smoothly without teleportation.
-/// </summary>
 public class CarController : MonoBehaviour
 {
     [Header("Car Identification")]
@@ -32,13 +28,11 @@ public class CarController : MonoBehaviour
     [SerializeField] private float currentSpeed;
     [SerializeField] private float distanceAlongPath;
 
-    // Path following state
     public enum PathType { Lane, TurnCurve }
     private PathType currentPathType = PathType.Lane;
     private Lane currentLane;
     private TurnCurve currentTurnCurve;
 
-    // Intersection state machine
     public enum CarState
     {
         OnLane,          // Traveling on a lane normally
@@ -51,35 +45,26 @@ public class CarController : MonoBehaviour
     private Node targetIntersection;
     private TurnCurve intendedTurn;
 
-    // Traffic light stop/go decision. Made ONCE per approach and latched so a
-    // car that cannot brake in time commits to clearing the intersection
-    // instead of flip-flopping between braking and running every frame.
+    // Latched once per approach: a car that can't brake in time commits to
+    // clearing the intersection instead of flip-flopping every frame.
     private enum LightDecision { None, Stop, Go }
     private LightDecision lightDecision = LightDecision.None;
 
-    // Set when a Stop decision was made inside the comfortable stopping
-    // distance (run-light commitment refused): brake harder than the comfort
-    // profile so the car still reaches ~0 at the line instead of slamming
+    // Set when a Stop decision was forced inside the comfortable stopping
+    // distance; brakes harder than the comfort profile to still reach ~0 at the line.
     private bool forcedStop = false;
 
-    // Reference to simulation manager
     private SimulationManager simulationManager;
 
-    // Configuration cache
+    // Defaults; overwritten from RoadConfig in Initialize()
     private float INTERSECTION_DETECTION_DISTANCE = 25f;
     private float STOP_LINE_BUFFER = 0.5f;
 
-    // Turn-priority yield look-ahead: a yielding turn (left/right) gives way to a
-    // conflicting higher-priority car that is either already within
-    // INTERSECTION_DETECTION_DISTANCE of its stop line (any speed - includes cars
-    // stopped or queued at the line) OR arriving within this many seconds (a faster
-    // car still farther out). The near horizon is bound to the detection distance on
-    // purpose: a car inside it has entered its Approaching state, so yielding to it
-    // matches the pre-existing right-of-way behaviour exactly and cannot regress when
-    // the detection distance is reconfigured.
-    private const float YIELD_TIME_HORIZON = 3f; // seconds of look-ahead for fast, still-distant cars
+    // Near-horizon yield distance is INTERSECTION_DETECTION_DISTANCE itself (ties it
+    // to the Approaching state so it can't drift if reconfigured); this constant only
+    // extends the look-ahead to catch a fast car that is still farther out.
+    private const float YIELD_TIME_HORIZON = 3f;
 
-    // Public properties for state access
     public float CurrentSpeed => currentSpeed;
     public Lane CurrentLane => currentLane;
     public TurnCurve CurrentTurnCurve => currentTurnCurve;
@@ -90,19 +75,15 @@ public class CarController : MonoBehaviour
     // the IntersectionManager can apply turn-aware right-of-way before the car stops.
     public TurnCurve IntendedTurn => intendedTurn;
 
-    // True while this car has committed to continuing through a yellow light
-    // and is still approaching the stop line (checked by IntersectionManager
-    // so the light gate doesn't force an instant stop at the line)
+    // True while committed to running a yellow and still approaching; lets
+    // IntersectionManager's light gate skip forcing an instant stop at the line.
     public bool IsCommittedToRunLight =>
         lightDecision == LightDecision.Go && currentState == CarState.Approaching;
 
-    // Deceleration used for planned (non-emergency) braking; the remaining
-    // headroom up to MaxBraking absorbs tracking error and surprises
+    // Planned (non-emergency) braking rate; headroom up to MaxBraking absorbs
+    // tracking error and surprises.
     private float ComfortableBraking => MaxBraking * 0.7f;
 
-    /// <summary>
-    /// Initialize car with starting lane and position.
-    /// </summary>
     public void Initialize(int id, Lane startLane, float startDistance, SimulationManager manager)
     {
         CarID = id;
@@ -114,7 +95,6 @@ public class CarController : MonoBehaviour
         lightDecision = LightDecision.None;
         simulationManager = manager;
 
-        // Load configuration parameters
         var config = manager.GetRoadGenerator()?.GetConfig();
         if (config != null)
         {
@@ -122,48 +102,40 @@ public class CarController : MonoBehaviour
             STOP_LINE_BUFFER = config.StopLineBuffer;
         }
 
-        // Set initial position and rotation
         UpdatePositionAndRotation();
     }
 
     void Update()
     {
-        // IntersectionManager is not serialized, so it does not survive a
-        // domain reload during play mode - stand still instead of throwing
-        // thousands of exceptions per second
+        // IntersectionManager isn't serialized, so it doesn't survive a domain
+        // reload in play mode; stand still instead of throwing every frame.
         if (simulationManager == null || currentLane == null ||
             simulationManager.IntersectionManager == null)
             return;
 
         float deltaTime = Time.deltaTime;
 
-        // Locate the nearest car ahead along our travel path once per frame;
-        // shared by the speed controller and the emergency stop check
+        // Computed once and shared by the speed controller and the emergency stop check below.
         float gapToCarAhead;
         CarController carAhead = FindCarAhead(out gapToCarAhead);
 
-        // Calculate target speed (considers obstacles and intersection state)
         float targetSpeed = CalculateTargetSpeed(carAhead, gapToCarAhead);
 
-        // Adjust current speed towards target speed
         if (currentSpeed < targetSpeed)
         {
             currentSpeed = Mathf.Min(currentSpeed + MaxAcceleration * deltaTime, targetSpeed);
         }
         else if (currentSpeed > targetSpeed)
         {
-            // Brake proportionally to the speed error: gentle for small
-            // corrections, full MaxBraking authority for genuine stops
+            // Proportional brake: gentle for small corrections, full MaxBraking for genuine stops.
             float brakeRate = Mathf.Min(MaxBraking, (currentSpeed - targetSpeed) * 8f);
             currentSpeed = Mathf.Max(currentSpeed - brakeRate * deltaTime, targetSpeed);
         }
 
-        // Move along current path
         float distanceDelta = currentSpeed * deltaTime;
         float newDistanceAlongPath = distanceAlongPath + distanceDelta;
 
-        // EMERGENCY BRAKE ONLY - never move into the car ahead. Normal spacing
-        // is maintained by CalculateTargetSpeed; this is the last resort.
+        // Last-resort emergency brake; normal spacing is already handled by CalculateTargetSpeed.
         if (carAhead != null)
         {
             float predictedGap = gapToCarAhead - distanceDelta
@@ -177,7 +149,6 @@ public class CarController : MonoBehaviour
 
         distanceAlongPath = newDistanceAlongPath;
 
-        // State-aware path management
         if (currentPathType == PathType.Lane)
         {
             HandleLaneMovement();
@@ -187,15 +158,13 @@ public class CarController : MonoBehaviour
             HandleIntersectionMovement();
         }
 
-        // Update transform
         UpdatePositionAndRotation();
     }
 
     /// <summary>
-    /// Target speed is the minimum of independent constraints (cruise speed,
-    /// car ahead, intersection rules) so the tightest one always wins. Each
-    /// constraint is smooth and physically trackable, which is what prevents
-    /// the sudden stops the old branch-chain logic produced.
+    /// Target speed is the min of independent constraints (cruise, car ahead,
+    /// intersection); each constraint is smooth, which keeps braking continuous
+    /// instead of causing sudden stops.
     /// </summary>
     private float CalculateTargetSpeed(CarController carAhead, float gapToCarAhead)
     {
@@ -235,9 +204,8 @@ public class CarController : MonoBehaviour
     }
 
     /// <summary>
-    /// Speed limit imposed by the intersection at the end of the current lane:
-    /// traffic lights (with a latched stop/go decision), right-of-way and
-    /// conflict gates, and the don't-block-the-box rule.
+    /// Speed limit from traffic lights, right-of-way/conflict gates, and the
+    /// don't-block-the-box rule for the intersection at the end of this lane.
     /// </summary>
     private float IntersectionSpeedLimit()
     {
@@ -249,7 +217,7 @@ public class CarController : MonoBehaviour
 
         if (currentState == CarState.WaitingToEnter)
         {
-            return 0f; // Must stop at intersection
+            return 0f;
         }
 
         float distanceToStopLine = currentLane.Length - distanceAlongPath;
@@ -285,15 +253,10 @@ public class CarController : MonoBehaviour
         {
             if (!CanProceedIntoIntersection())
             {
-                // Brake on the accelerate-then-stop envelope (harmonic blend of
-                // MaxAcceleration and ComfortableBraking), not the pure braking
-                // curve: a queued car restarting a few units short of the line
-                // accelerates under the pure curve and only meets it at the line,
-                // arriving too fast to hold and eligible for the escape hatch in
-                // CanProceedIntoIntersection. The blended curve is the fastest
-                // profile that can still stop at the line from a standing restart
-                // anywhere along the approach, so arrival stays below the hatch's
-                // mover threshold and the yield gate keeps its authority.
+                // Harmonic blend of MaxAcceleration and ComfortableBraking, not the pure
+                // braking curve: a queued car restarting near the line would otherwise
+                // accelerate past a safe arrival speed and trip the escape hatch below,
+                // bypassing the yield gate.
                 float restartSafeDecel = MaxAcceleration * ComfortableBraking
                                          / (MaxAcceleration + ComfortableBraking);
                 limit = Mathf.Min(limit, BrakingSpeedForDistance(distanceToStopLine - STOP_LINE_BUFFER, restartSafeDecel));
@@ -332,13 +295,9 @@ public class CarController : MonoBehaviour
             return true;
         }
 
-        // Escape hatch: if the box/yield constraint materialized inside our
-        // physical stopping distance, enter anyway - cross-boundary following
-        // parks us on the curve if needed, which beats an instant stop. Only
-        // a genuine mover qualifies: a slow or stopped car can always hold,
-        // and a car at the line has negative distanceToStop, so without the
-        // speed gate every waiting car would take the hatch and bypass the
-        // yield rules the moment the light turns green.
+        // Escape hatch: if the constraint appears inside our stopping distance, enter
+        // anyway - an instant stop is worse than parking on the curve. Gated on speed so
+        // a stopped/queued car can't use it to bypass yield rules the moment light turns green.
         if (currentSpeed < 3f)
         {
             return false;
@@ -389,19 +348,11 @@ public class CarController : MonoBehaviour
     }
 
     /// <summary>
-    /// Turn-type right-of-way (right-hand traffic): straight beats right beats
-    /// left. A yielding movement (left, or right vs a straight) gives way to any
-    /// conflicting higher-priority car that is close enough to matter: either within
-    /// INTERSECTION_DETECTION_DISTANCE of its stop line at ANY speed (so we yield to
-    /// a stopped or crawling car queued at the line and never cut in front of it), or
-    /// arriving within YIELD_TIME_HORIZON seconds (so we also yield to a faster car
-    /// that is still farther out - the case the old state-gated check missed and let
-    /// a left cut in). We skip a car only when it is both beyond the detection
-    /// distance AND slower to arrive than the time horizon. A car that has not chosen
-    /// its turn yet (still OnLane) is treated by its worst plausible (highest-priority
-    /// conflicting) movement. Approach angle is irrelevant - only the turn types and
-    /// whether the paths actually cross. At a signal, cars held on a red phase are
-    /// ignored so we don't stall on our own green.
+    /// Turn-type right-of-way (right-hand traffic): straight beats right beats left.
+    /// A yielding movement gives way to a conflicting higher-priority car within
+    /// INTERSECTION_DETECTION_DISTANCE (any speed) or arriving within YIELD_TIME_HORIZON.
+    /// OnLane cars with no chosen turn yet are judged by their worst-case plausible
+    /// movement; cars held on a red phase are ignored so we don't stall on our own green.
     /// </summary>
     private bool MustYieldByTurnPriority()
     {
@@ -429,27 +380,18 @@ public class CarController : MonoBehaviour
             if (car.currentState == CarState.Crossing)
                 continue;
 
-            // Consider this car only if it is close enough to matter: near the line
-            // at any speed (a stopped/queued higher-priority car we must not cut in
-            // front of) or arriving soon (a faster car still farther out). Skip it
-            // only when it is both beyond the detection distance and slow to arrive.
             float theirDistToLine = car.currentLane.Length - car.distanceAlongPath;
             float theirTimeToArrival = theirDistToLine / Mathf.Max(car.currentSpeed, 0.1f);
             if (theirDistToLine > INTERSECTION_DETECTION_DISTANCE && theirTimeToArrival > YIELD_TIME_HORIZON)
                 continue; // genuinely far and not arriving soon - a large enough gap
 
-            // A car parked short of the line is boxed in behind its own queue
-            // head (queue spacing keeps followers 4+ units back) and cannot be
-            // the next to enter from its lane, so it holds no immediate claim.
-            // Yielding to it stalls both approaches when its own head is a
-            // yielding turn too: each head waits on a follower that can never
-            // arrive while the heads hold.
+            // A car stopped short of the line is queued behind its own head and can't be
+            // next to enter; yielding to it anyway can deadlock two yielding turns that
+            // each wait on a follower that never arrives.
             if (car.currentSpeed < 0.5f && theirDistToLine > 3f)
                 continue;
 
-            // Only give way to a strictly higher-priority movement whose path
-            // crosses ours. An OnLane car has no chosen turn yet, so assume its
-            // worst plausible movement.
+            // OnLane car has no chosen turn yet; assume its worst-case plausible movement.
             if (!HasHigherPriorityConflict(car, myPriority, manager))
                 continue;
 
@@ -469,11 +411,9 @@ public class CarController : MonoBehaviour
     }
 
     /// <summary>
-    /// Whether <paramref name="car"/> has (or, if it has not chosen a turn yet,
-    /// could have) a movement that both outranks our priority and crosses our
-    /// intended turn. OnLane cars have no assigned turn, so every turn their lane
-    /// offers is considered and the worst case wins - this is what stops a left
-    /// from ignoring a straight that simply has not started its approach yet.
+    /// True if <paramref name="car"/> has, or could plausibly have, a movement that
+    /// outranks our priority and crosses our intended turn. OnLane cars have no turn
+    /// yet, so every turn their lane offers is considered and the worst case wins.
     /// </summary>
     private bool HasHigherPriorityConflict(CarController car, int myPriority, IntersectionManager manager)
     {
@@ -531,9 +471,8 @@ public class CarController : MonoBehaviour
             return;
         }
 
-        // A refused commitment (forced stop) gets retried while the yellow
-        // lasts: if the conflicting crosser clears in time, running the light
-        // beats the physically impossible stop we were left with
+        // A refused commitment (forced stop) is retried while yellow lasts: if the
+        // conflicting crosser clears, running the light beats the impossible stop we were left with.
         if (lightDecision == LightDecision.Stop && forcedStop && currentSpeed > 3f &&
             lightState == StopLightController.LightState.Yellow && intendedTurn != null &&
             simulationManager.IntersectionManager.TryCommitRunLight(this, currentLane.EndNode, intendedTurn))
@@ -735,12 +674,8 @@ public class CarController : MonoBehaviour
         return closestAhead;
     }
 
-    /// <summary>
-    /// Handle lane movement logic including intersection detection and state transitions.
-    /// </summary>
     private void HandleLaneMovement()
     {
-        // Safety check
         if (currentPathType != PathType.Lane)
         {
             Debug.LogError($"Car {CarID}: HandleLaneMovement called but pathType is {currentPathType}!");
@@ -752,21 +687,20 @@ public class CarController : MonoBehaviour
         // Transition: OnLane -> Approaching (skip for trivial intersections with only 2 roads)
         if (distanceToEnd < INTERSECTION_DETECTION_DISTANCE && currentState == CarState.OnLane)
         {
-            // Verify lane has endpoint
             if (currentLane.EndNode == null)
             {
                 Debug.LogError($"Car {CarID}: Lane {currentLane.ID} has no EndNode!");
                 return;
             }
 
-            // Skip intersection logic for trivial intersections (only 2 roads connected)
-            // These are just straight-through continuations with no collision risk
+            // Trivial intersections (only 2 roads) are straight-through continuations
+            // with no collision risk, so intersection logic is skipped for them.
             if (!currentLane.EndNode.IsTrivialIntersection())
             {
                 currentState = CarState.Approaching;
                 targetIntersection = currentLane.EndNode;
 
-                // Pre-select turn (ONLY once!)
+                // Selected once; other cars' yield checks read IntendedTurn from here on.
                 if (currentLane.AvailableTurns.Count > 0)
                 {
                     intendedTurn = currentLane.AvailableTurns[Random.Range(0, currentLane.AvailableTurns.Count)];
@@ -778,7 +712,6 @@ public class CarController : MonoBehaviour
                     return;
                 }
 
-                // Register as waiting
                 simulationManager.IntersectionManager.UpdateCarWaitingAt(this, currentLane, targetIntersection);
             }
         }
@@ -788,7 +721,6 @@ public class CarController : MonoBehaviour
         {
             if (CanProceedIntoIntersection())
             {
-                // Proceed through intersection
                 currentState = CarState.Crossing;
                 simulationManager.IntersectionManager.RegisterEntry(this, targetIntersection, intendedTurn);
                 simulationManager.IntersectionManager.RemoveCarWaitingAt(this, currentLane, targetIntersection);
@@ -796,16 +728,13 @@ public class CarController : MonoBehaviour
             }
             else
             {
-                // Must wait
                 currentState = CarState.WaitingToEnter;
                 SetLightDecision(LightDecision.None);
             }
         }
 
-        // Handle WaitingToEnter state
         if (currentState == CarState.WaitingToEnter)
         {
-            // Check if we can enter now
             if (CanProceedIntoIntersection())
             {
                 currentState = CarState.Crossing;
@@ -815,11 +744,9 @@ public class CarController : MonoBehaviour
             }
             else
             {
-                // Must wait
                 currentSpeed = 0f;
 
-                // Resolve any overlap with a car ahead on the same lane
-                // gradually (rate-limited) instead of teleporting backwards
+                // Resolve overlap gradually (rate-limited) instead of teleporting backwards.
                 float gapAhead;
                 CarController carAhead = FindCarAhead(out gapAhead);
                 if (carAhead != null && carAhead.currentPathType == PathType.Lane &&
@@ -834,23 +761,20 @@ public class CarController : MonoBehaviour
                 }
                 else
                 {
-                    // No car ahead - stop at stop line
                     distanceAlongPath = Mathf.Min(distanceAlongPath, currentLane.Length - 0.1f);
                 }
 
-                return; // Don't allow further movement
+                return; // skip the lane-end transition check below while stuck waiting
             }
         }
 
         // Transition to turn curve when at lane end
         if (distanceAlongPath >= currentLane.Length)
         {
-            // For trivial intersections (2 roads), set up minimal state for direct transition
             bool isTrivial = currentLane.EndNode != null && currentLane.EndNode.IsTrivialIntersection();
 
             if (isTrivial && currentState == CarState.OnLane)
             {
-                // Trivial intersection - set up turn and state directly
                 if (currentLane.AvailableTurns.Count > 0)
                 {
                     intendedTurn = currentLane.AvailableTurns[0]; // Only one turn in trivial intersection
@@ -879,19 +803,14 @@ public class CarController : MonoBehaviour
         }
     }
 
-    /// <summary>
-    /// Handle intersection (turn curve) movement logic.
-    /// </summary>
     private void HandleIntersectionMovement()
     {
-        // Safety check
         if (currentPathType != PathType.TurnCurve)
         {
             Debug.LogError($"Car {CarID}: HandleIntersectionMovement called but pathType is {currentPathType}!");
             return;
         }
 
-        // Should be in Crossing state while on turn curve
         if (currentState != CarState.Crossing)
         {
             Debug.LogWarning($"Car {CarID}: On turn curve but state is {currentState}, correcting to Crossing");
@@ -901,7 +820,6 @@ public class CarController : MonoBehaviour
         // Exit when turn complete
         if (distanceAlongPath >= currentTurnCurve.ArcLength)
         {
-            // Unregister from intersection
             if (targetIntersection != null)
             {
                 simulationManager.IntersectionManager.RegisterExit(this, targetIntersection);
@@ -916,8 +834,7 @@ public class CarController : MonoBehaviour
     }
 
     /// <summary>
-    /// Transition from lane end to turn curve (entering intersection).
-    /// MUST be in Crossing state before calling.
+    /// Must be called with currentState already Crossing.
     /// </summary>
     private void TransitionToTurnCurve()
     {
@@ -946,34 +863,23 @@ public class CarController : MonoBehaviour
         // State remains Crossing - don't change it!
     }
 
-    /// <summary>
-    /// Transition from turn curve to destination lane (exiting intersection).
-    /// Handles full state cleanup and checks for cars already on destination lane.
-    /// </summary>
     private void TransitionToNextLane()
     {
-        // Get destination lane
         Lane destinationLane = currentTurnCurve.ToLane;
-
-        // Carry overshoot past the curve end onto the new lane
         float overshoot = Mathf.Max(0f, distanceAlongPath - currentTurnCurve.ArcLength);
-
-        // Check for cars already on the destination lane and find safe starting position
         float safeStartDistance = FindSafeStartPositionOnLane(destinationLane);
 
-        // Release any light commitment before intersection state is cleared
+        // Release any light commitment before intersection state is cleared.
         SetLightDecision(LightDecision.None);
 
-        // Transition to new lane
         currentLane = destinationLane;
         currentPathType = PathType.Lane;
         distanceAlongPath = Mathf.Max(safeStartDistance, Mathf.Min(overshoot, destinationLane.Length));
 
-        // NOW clear intersection-related state
         currentState = CarState.OnLane;
         targetIntersection = null;
         intendedTurn = null;
-        currentTurnCurve = null; // Clear reference
+        currentTurnCurve = null;
     }
 
     /// <summary>
@@ -993,7 +899,6 @@ public class CarController : MonoBehaviour
             if (car == this || car == null)
                 continue;
 
-            // Check if car is on the destination lane
             if (car.currentPathType == PathType.Lane && car.currentLane == lane)
             {
                 if (car.distanceAlongPath < closestCarDistance)
@@ -1009,18 +914,15 @@ public class CarController : MonoBehaviour
             float requiredGap = (CarLength + closestCar.CarLength) * 0.5f + MinimumCarBuffer;
             if (closestCarDistance < requiredGap)
             {
-                // Destination is packed to the lane start - hold at the mouth
-                // and match the queue tail so we don't drive into it
+                // Packed at the lane start: match the queue tail speed so we don't drive into it.
                 currentSpeed = Mathf.Min(currentSpeed, closestCar.CurrentSpeed);
             }
         }
 
-        return 0f; // start at the beginning of the lane and brake normally
+        // Always starts at the lane mouth; safety comes from the speed clamp above, not a distance offset.
+        return 0f;
     }
 
-    /// <summary>
-    /// Update car's position and rotation based on current path progress.
-    /// </summary>
     private void UpdatePositionAndRotation()
     {
         Vector3 position;
@@ -1040,7 +942,6 @@ public class CarController : MonoBehaviour
             direction = currentTurnCurve.GetDirectionAtTime(t);
         }
 
-        // Update transform
         transform.position = position;
 
         if (direction.sqrMagnitude > 0.001f)
@@ -1049,9 +950,6 @@ public class CarController : MonoBehaviour
         }
     }
 
-    /// <summary>
-    /// Get current world position (for logging).
-    /// </summary>
     public Vector3 GetPosition()
     {
         return transform.position;

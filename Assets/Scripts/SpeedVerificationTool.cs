@@ -2,8 +2,7 @@ using UnityEngine;
 using System.Collections.Generic;
 
 /// <summary>
-/// Debug tool to verify that vehicle speeds are now correct on bridges.
-/// Attach to SimulationManager and check the console for analysis.
+/// Debug tool for verifying vehicle speeds on bridges. Attach to SimulationManager and check the console for analysis.
 /// </summary>
 public class SpeedVerificationTool : MonoBehaviour
 {
@@ -64,7 +63,6 @@ public class SpeedVerificationTool : MonoBehaviour
             {
                 lanesWithBridges++;
                 
-                // Calculate horizontal distance
                 float horizontalDist = Vector3.Distance(lane.StartPosition, lane.EndPosition);
                 float actual3DDist = lane.Length;
                 float difference = actual3DDist - horizontalDist;
@@ -110,10 +108,8 @@ public class SpeedVerificationTool : MonoBehaviour
             if (car == null || car.CurrentLane == null)
                 continue;
             
-            // Check if on a bridge
             bool onBridge = car.CurrentLane.Bridges != null && car.CurrentLane.Bridges.Count > 0;
             
-            // Measure actual 3D speed by tracking position change
             Vector3 currentPos = car.GetPosition();
             
             Debug.Log($"Car {car.CarID}:");
@@ -140,7 +136,7 @@ public class SpeedVerificationTool : MonoBehaviour
             if (lane.Bridges != null && lane.Bridges.Count > 0)
             {
                 TestLaneArcLength(lane);
-                break; // Test first bridge lane only
+                break; // only test the first bridge lane found
             }
         }
     }
@@ -154,7 +150,6 @@ public class SpeedVerificationTool : MonoBehaviour
         Debug.Log($"3D Arc Length: {lane.Length:F3} units");
         Debug.Log($"Difference: {(lane.Length - horizontalLength):F3} units");
         
-        // Test position mapping
         Debug.Log("\nPosition Mapping Test:");
         for (float dist = 0f; dist <= lane.Length; dist += lane.Length * 0.25f)
         {
@@ -162,7 +157,6 @@ public class SpeedVerificationTool : MonoBehaviour
             Debug.Log($"  Distance {dist:F2}: Position {pos}, Y={pos.y:F3}");
         }
         
-        // Verify uniform spacing in 3D
         Debug.Log("\n3D Spacing Verification:");
         float stepDistance = lane.Length / 10f;
         Vector3 prevPos = lane.GetPositionAtDistance(0f);
