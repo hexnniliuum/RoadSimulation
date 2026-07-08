@@ -75,9 +75,7 @@ vehicle_id, positionX, positionY, positionZ, time
 
 ## Known Issues
 
-*   **Topology Generation**: A final width-aware repair pass removes sub-angle spikes, roads grazing an unrelated intersection, and un-bridgeable at-grade crossings, so these no longer reach the final graph. At extreme jitter (well above segment length) the repair may thin the network to keep it valid; reduce `IntersectionJitter` or raise segment lengths for denser maps.
-*   **Right of Way**: Turning cars yield to conflicting higher-priority movements (straight > right > left) from any approach, and priority-to-the-right recognises a close approaching car, not only a fully stopped one. Priority can still be overridden by the deadlock breaker, run-light commitments, and the cannot-stop physics exemption (a genuine mover that can no longer stop is let through; a stopped or restarting car always holds) — these are intentional.
-*   **Turn Geometry**: Opposite-approach left turns whose arcs would overlap are flattened at generation so both can proceed on the same green; the flattening breaks tangent continuity at the turn's entry/exit, so cars visibly snap their heading there. Pairs that cannot be separated (one turn exits onto the other's approach road) simply take turns. Sharp turns may still bulge slightly outside the intersection footprint.
+*   **Deadlock clearing**: jammed unsignalized intersections drain slowly — the breaker lets one or two cars through, waits out the timeout, and repeats instead of flushing the jam.
 
 ## Limitations
 
