@@ -210,10 +210,7 @@ Healthy runs show hard-braking events (decel > 25 u/s²) in the single digits pe
 ## 10. Known Issues & Limitations
 
 ### Identified Defects
-*   **Topology Generation**: The width-aware repair pass (§5, step 3) removes overlapping/grazing/spike geometry from the final graph. At extreme jitter (well above segment length) it may thin the network to keep it valid; lower `IntersectionJitter` or raise segment lengths for denser maps.
-*   **Right of Way**: Priority is still sometimes overridden by design — deadlock breaking, run-light commitments, and the cannot-stop physics exemptions (genuine movers only; stopped cars always hold) supersede normal right-of-way order, which can read as rule violations.
-*   **Turn Geometry**: Sharp turns may still bulge outside the intersection footprint (the sharp-turn Bézier control point is allowed up to 3× the endpoint gap).
-*   **Flattened-Turn Tangent Discontinuity**: opposite-left flattening (§5, step 6) moves the Bézier control point off the lane-direction rays, so a flattened curve's tangent no longer matches the lane heading at the turn's entry and exit — cars visibly snap their heading when entering/leaving such a turn. Fixing this needs a curve with more degrees of freedom (e.g. a cubic with endpoint-tangent constraints) rather than a repositioned quadratic control point.
+*   **Deadlock clearing**: jammed unsignalized intersections drain slowly — the breaker lets one or two cars through, waits out the timeout, and repeats instead of flushing the jam.
 
 ### Simulation Constraints
 *   **Interaction**: Editor-only (Scene view + Inspector); no runtime UI.
