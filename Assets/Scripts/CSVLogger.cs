@@ -3,8 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 
 /// <summary>
-/// Logs vehicle positions to CSV file for analysis and heatmap generation.
-/// CSV Format: vehicle_id,positionX,positionY,positionZ,time
+/// Logs vehicle positions to CSV for offline analysis and heatmap generation.
 /// </summary>
 public class CSVLogger : MonoBehaviour
 {
@@ -75,11 +74,10 @@ public class CSVLogger : MonoBehaviour
             return;
         }
         
-        // Create file path (in project root, outside Assets folder)
+        // Application.dataPath is the Assets folder; write outside it so Unity doesn't index the CSV as an asset.
         string projectRoot = Path.Combine(Application.dataPath, "..");
         filePath = Path.Combine(projectRoot, outputFilename);
         
-        // Ensure the directory exists
         string directory = Path.GetDirectoryName(filePath);
         if (!Directory.Exists(directory))
         {
@@ -88,7 +86,6 @@ public class CSVLogger : MonoBehaviour
         
         try
         {
-            // Create or overwrite file with header
             writer = new StreamWriter(filePath, false);
             writer.WriteLine("vehicle_id,positionX,positionY,positionZ,time");
             writer.Flush();
@@ -123,9 +120,6 @@ public class CSVLogger : MonoBehaviour
         Debug.Log($"CSV logging stopped. File saved: {filePath}");
     }
     
-    /// <summary>
-    /// Log current positions of all vehicles.
-    /// </summary>
     private void LogVehiclePositions()
     {
         if (writer == null)
@@ -141,25 +135,18 @@ public class CSVLogger : MonoBehaviour
             
             Vector3 pos = car.GetPosition();
             
-            // Format: vehicle_id,positionX,positionY,positionZ,time
             writer.WriteLine($"{car.CarID},{pos.x:F3},{pos.y:F3},{pos.z:F3},{currentTime:F3}");
         }
         
-        // Flush every N logs to prevent data loss
+        // Flush immediately so a crash before OnDestroy doesn't lose buffered rows.
         writer.Flush();
     }
     
-    /// <summary>
-    /// Get current log file path (for display/debugging).
-    /// </summary>
     public string GetLogFilePath()
     {
         return filePath;
     }
     
-    /// <summary>
-    /// Check if currently logging.
-    /// </summary>
     public bool IsLogging()
     {
         return isLogging;

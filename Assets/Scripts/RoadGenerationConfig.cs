@@ -1,8 +1,5 @@
 using UnityEngine;
 
-/// <summary>
-/// Configuration settings for procedural road network generation.
-/// </summary>
 [CreateAssetMenu(fileName = "RoadGenerationConfig", menuName = "Traffic Simulation/Road Generation Config")]
 public class RoadGenerationConfig : ScriptableObject
 {

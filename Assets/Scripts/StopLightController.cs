@@ -10,23 +10,17 @@ public class StopLightController
 {
     public Node IntersectionNode;
     
-    // Configuration
     private float greenDuration = 10f;
     private float yellowDuration = 3f;
     private float allRedDuration = 2f; // Safety buffer between phases
 
-    // Two roads may share a green phase only if they are within this many degrees of a
-    // straight 180° opposite (i.e. at least 180 - this apart). Beyond it a road counts as
-    // having "no opposite" and phases alone. At 60° this admits bent through-roads whose
-    // arms are as little as 120° apart (a skewed "X" whose second through-pair sits ~57°
-    // off opposite), while still soloing genuinely perpendicular arms (~90° apart, which
-    // land in the 60-120° dev band) and near-parallel arms (dev > ~110°). Pairing only
-    // affects which approaches share a green; within a phase the per-movement turn-conflict
-    // map still serializes any crossing movements, so this is a throughput/appearance knob,
-    // not a safety one.
+    // Two roads share a green only within this many degrees of exact opposite (180°). 60°
+    // admits skewed "X" junctions (through-pairs as little as ~120° apart) while still soloing
+    // perpendicular (~90°) and near-parallel (dev > ~110°) arms. This only decides which roads
+    // can share a green - crossing movements within a phase are still serialized by the
+    // per-movement turn-conflict map, so it's a throughput knob, not a safety one.
     private const float MAX_PAIRING_DEVIATION = 60f;
     
-    // State
     private List<StopLightPhase> phases;
     private int currentPhaseIndex = 0;
     private float timer = 0f;
@@ -48,7 +42,6 @@ public class StopLightController
     
     private void InitializePhases()
     {
-        // 1. Identify all incoming lanes with their road directions and angles
         List<LaneWithDirection> lanesWithDirs = new List<LaneWithDirection>();
         
         foreach (var road in IntersectionNode.ConnectedRoads)
@@ -84,7 +77,7 @@ public class StopLightController
         
         if (lanesWithDirs.Count == 0) return;
         
-        // 2. Group lanes by road direction (same angle = same road = same direction)
+        // Round the angle to bucket lanes arriving at the same angle - i.e. from the same road.
         var roadGroups = lanesWithDirs
             .GroupBy(l => Mathf.Round(l.Angle))
             .OrderBy(g => g.Key)
@@ -93,13 +86,6 @@ public class StopLightController
         int numRoads = roadGroups.Count;
         if (numRoads == 0) return;
         
-        // 3. Find candidate pairings: two roads share a green phase only when they are
-        // roughly opposite each other (near 180° apart). A road whose nearest neighbour
-        // to opposite is still too skewed (perpendicular, near-parallel, or a Y-junction
-        // arm) has "no opposite" and gets its own solo phase. This replaces the old
-        // circular-adjacency exclusion, which wrongly discarded the true opposite pair
-        // whenever it fell next to another road in sorted-angle order (every pair at a
-        // 3-way, and the real opposite pair at skewed 4-ways).
         List<(int roadA, int roadB, float deviationFrom180)> possiblePairs = new List<(int, int, float)>();
 
         for (int i = 0; i < numRoads; i++)
@@ -119,12 +105,8 @@ public class StopLightController
             }
         }
 
-        // 4. Maximum-cardinality matching over the eligible pairs, breaking ties
-        // toward the most-opposite pairing. Greedy "smallest deviation first"
-        // could consume a road's only eligible partner and needlessly leave two
-        // other roads soloed - producing extra phases and the "one green, three
-        // red" appearance at a 4-way that actually has two valid opposite pairs.
-        // A maximum matching pairs every road that has an available opposite.
+        // Greedy "smallest deviation first" can strand a road whose only eligible partner
+        // already paired off, leaving avoidable solo phases; use max matching instead.
         int[] partner = FindBestMatching(numRoads, possiblePairs);
 
         Dictionary<int, int> roadToPhase = new Dictionary<int, int>();
@@ -143,7 +125,6 @@ public class StopLightController
             currentPhase++;
         }
         
-        // 7. Build phases from road assignments (include all lanes from each road)
         int maxPhase = roadToPhase.Values.Max();
         for (int p = 0; p <= maxPhase; p++)
         {
@@ -166,15 +147,11 @@ public class StopLightController
     }
     
     /// <summary>
-    /// Maximum-cardinality matching over the eligible near-opposite pairs, with
-    /// smallest total deviation as a tie-break. Returns partner[i] = matched road
-    /// index for road i, or -1 if it stays solo. numRoads is small (intersection
-    /// arms), so an exhaustive search is cheap and always finds the optimum,
-    /// unlike the previous greedy pass.
+    /// Exhaustive max-cardinality matching over near-opposite pairs. Returns partner[i], or -1
+    /// if road i stays solo. numRoads is small (an intersection's arm count), so brute force is cheap.
     /// </summary>
     private int[] FindBestMatching(int numRoads, List<(int roadA, int roadB, float deviationFrom180)> pairs)
     {
-        // Adjacency: for each road, its eligible partners and their deviations.
         var adj = new Dictionary<int, List<(int other, float dev)>>();
         foreach (var pair in pairs)
         {
@@ -205,14 +182,12 @@ public class StopLightController
                 return;
             }
 
-            // Already matched by an earlier road - move on.
             if (match[idx] != -1)
             {
                 Recurse(idx + 1, count, dev);
                 return;
             }
 
-            // Option A: pair idx with each still-free partner of higher index.
             if (adj.ContainsKey(idx))
             {
                 foreach (var (other, d) in adj[idx])
@@ -228,7 +203,6 @@ public class StopLightController
                 }
             }
 
-            // Option B: leave idx solo.
             Recurse(idx + 1, count, dev);
         }
 
@@ -270,7 +244,6 @@ public class StopLightController
             case LightState.Red:
                 if (timer >= allRedDuration)
                 {
-                    // Advance to next phase
                     currentPhaseIndex = (currentPhaseIndex + 1) % phases.Count;
                     currentLightState = LightState.Green;
                     timer = 0f;
@@ -281,15 +254,13 @@ public class StopLightController
     
     public LightState GetLightState(Lane incomingLane)
     {
-        if (phases.Count == 0) return LightState.Green; // Default to green if no logic
+        if (phases.Count == 0) return LightState.Green; // No phases (no real intersection here) - default green, not a permanent red
         
-        // Check if the lane is in the current active phase
         if (phases[currentPhaseIndex].Lanes.Contains(incomingLane))
         {
             return currentLightState;
         }
         
-        // If not in active phase, it's Red
         return LightState.Red;
     }
     

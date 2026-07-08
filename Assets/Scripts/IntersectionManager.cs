@@ -3,44 +3,37 @@ using UnityEngine;
 using System.Linq;
 
 /// <summary>
-/// Manages intersection states, turn conflicts, and right-of-way rules.
-/// Implements "priority to the right" traffic logic.
+/// Arbitrates intersection right-of-way: turn conflicts, queue order, priority-to-right, and deadlock breaking.
 /// </summary>
 public class IntersectionManager
 {
-    // State tracking per node
     private Dictionary<Node, IntersectionState> intersectionStates;
-    
-    // Traffic lights
+
     private Dictionary<Node, StopLightController> stopLights;
-    
-    // Pre-computed conflict map: which turn curves intersect
+
+    // Precomputed: turn -> turns it conflicts with
     private Dictionary<TurnCurve, HashSet<TurnCurve>> turnConflicts;
-    
-    // Configuration
+
     private float deadlockTimeout = 3f;
-    
-    // Deadlock breaking: track which car is currently allowed to force entry
+
+    // Car currently allowed to force entry through a deadlocked intersection
     private Dictionary<Node, CarController> carBreakingDeadlock;
 
-    // When the current deadlock breaker was designated (for expiry if it
-    // never manages to enter, e.g. because its exit is blocked)
+    // Timestamp the breaker was designated; used to expire it if it never
+    // manages to enter (e.g. its exit is blocked)
     private Dictionary<Node, float> breakerAssignedTime;
 
-    // Cars committed to running a yellow light, per node. Arbitrated so two
-    // cars with conflicting turns can never both commit to the same phase change.
+    // Cars committed to running a yellow, per node. Arbitrated so two cars
+    // with conflicting turns can never both commit to the same phase change.
     private Dictionary<Node, Dictionary<CarController, TurnCurve>> committedRuns;
 
-    // Track cars granted entry this frame to prevent simultaneous conflicting entries
+    // Turns granted this frame, checked so two cars can't be granted conflicting entries simultaneously
     private Dictionary<Node, HashSet<CarController>> carsGrantedThisFrame;
     private Dictionary<Node, HashSet<TurnCurve>> turnsGrantedThisFrame;
 
     // Cached from config for stuck-car detection
     private float detectionDistance = 25f;
-    
-    /// <summary>
-    /// Initialize intersection management system with road network.
-    /// </summary>
+
     public void Initialize(RoadMap roadMap, RoadGenerationConfig config)
     {
         intersectionStates = new Dictionary<Node, IntersectionState>();
@@ -55,14 +48,13 @@ public class IntersectionManager
         deadlockTimeout = config.DeadlockTimeout;
         detectionDistance = config.IntersectionDetectionDistance;
 
-        // Build intersection states for each node with 2+ roads
         foreach (var node in roadMap.Nodes)
         {
             if (node.ConnectedRoads.Count >= 2)
             {
                 IntersectionState state = new IntersectionState(node);
                 intersectionStates[node] = state;
-                carBreakingDeadlock[node] = null; // Initialize with no breaker
+                carBreakingDeadlock[node] = null;
                 breakerAssignedTime[node] = 0f;
                 committedRuns[node] = new Dictionary<CarController, TurnCurve>();
                 carsGrantedThisFrame[node] = new HashSet<CarController>();
@@ -70,26 +62,21 @@ public class IntersectionManager
             }
         }
 
-        // Determine which nodes get traffic lights based on configuration
-        // Candidates: Non-trivial intersections (more than 2 roads)
         var candidateNodes = roadMap.Nodes
             .Where(n => !n.IsTrivialIntersection() && n.ConnectedRoads.Count >= 2)
-            .OrderByDescending(n => n.ConnectedRoads.Count) // Prioritize highest connectivity
-            .ThenBy(n => n.ID) // Deterministic tie-breaking
+            .OrderByDescending(n => n.ConnectedRoads.Count)
+            .ThenBy(n => n.ID) // deterministic tie-break
             .ToList();
 
-        // Calculate count based on percentage (0-100)
         float percentage = Mathf.Clamp(config.TrafficLightPercentage, 0f, 100f);
         int targetCount = Mathf.RoundToInt(candidateNodes.Count * (percentage / 100f));
-        
-        // Create stop lights for the top N nodes
+
         for (int i = 0; i < targetCount; i++)
         {
             Node node = candidateNodes[i];
             stopLights[node] = new StopLightController(node);
         }
-        
-        // Pre-compute turn curve conflicts
+
         BuildTurnConflictMap();
         
         Debug.Log($"[IntersectionManager] Initialized {intersectionStates.Count} intersections. Traffic Lights: {stopLights.Count}/{candidateNodes.Count} ({percentage:F0}%)");
@@ -100,7 +87,6 @@ public class IntersectionManager
     /// </summary>
     public void Update(float deltaTime)
     {
-        // Reset per-frame entry tracking
         foreach (var node in carsGrantedThisFrame.Keys)
         {
             carsGrantedThisFrame[node].Clear();
@@ -114,7 +100,8 @@ public class IntersectionManager
     }
     
     /// <summary>
-    /// Check if a car can enter an intersection based on conflicts and priority rules.
+    /// Returns whether the car may proceed. Does not itself grant entry —
+    /// call GrantEntry/RegisterEntry separately once it does.
     /// </summary>
     public bool CanEnter(CarController car, Lane fromLane, TurnCurve intendedTurn, Node intersection)
     {
@@ -126,10 +113,9 @@ public class IntersectionManager
         
         var state = intersectionStates[intersection];
         
-        // Check 0: Traffic Lights (Overrides everything else)
-        // A car that committed to running a yellow it cannot stop for skips
-        // the light gate (commitments are arbitrated in TryCommitRunLight);
-        // everything below - queue order, conflicts - still applies to it.
+        // Check 0: traffic lights override everything else. A car committed to
+        // running a yellow it can't stop for skips this gate (commitments are
+        // arbitrated in TryCommitRunLight); every check below still applies to it.
         if (stopLights.ContainsKey(intersection))
         {
             var lightState = stopLights[intersection].GetLightState(fromLane);
@@ -137,10 +123,9 @@ public class IntersectionManager
             {
                 return false; // Stop on Red/Yellow
             }
-            // Green light: Proceed to other checks (still need to check for blocked intersection)
         }
 
-        // Check 1: Must be first in queue for this lane
+        // Check 1: must be first in queue for this lane
         if (state.waitingQueues.ContainsKey(fromLane))
         {
             var queue = state.waitingQueues[fromLane];
@@ -150,27 +135,20 @@ public class IntersectionManager
             }
             if (queue.Count > 0 && queue.Peek() != car)
             {
-                // Debug: Not first in queue
                 return false; // Not your turn yet
             }
         }
-        
-        // Check 2: DEADLOCK DETECTION - intersection-level, not per-car
-        // Only trigger if ALL cars at intersection are stuck
+
+        // Check 2: deadlock detection, intersection-level (triggers only once every queued car is stuck)
         CheckAndBreakDeadlock(intersection, state, car);
-        
-        // Check 2.5: Is this the car chosen to break deadlock?
+
+        // Check 2.5: designated deadlock breaker skips every remaining check
         if (carBreakingDeadlock.ContainsKey(intersection) && carBreakingDeadlock[intersection] == car)
         {
-            // if (intersection.ID == 7)
-            //     Debug.LogWarning($"[NODE-7] Car {car.CarID}: DEADLOCK BREAKER - forcing entry");
-            // else
-            //     Debug.LogWarning($"[DEADLOCK-BREAK] Car {car.CarID} at Node {intersection.ID}: Breaking deadlock");
-            
-            return true; // This car is allowed to force entry - SKIP all other checks
+            return true;
         }
-        
-        // Check 3: Path conflict - does intended turn overlap with active crossings?
+
+        // Check 3: does the intended turn overlap an active crossing?
         foreach (var activeKvp in state.activeCrossings)
         {
             if (activeKvp.Key == null)
@@ -181,9 +159,8 @@ public class IntersectionManager
                 return false; // Path overlaps with active vehicle
             }
         }
-        
-        // Check 3.5: Path conflict with turns granted this SAME FRAME
-        // This prevents two cars from entering simultaneously with conflicting paths
+
+        // Check 3.5: same, but against turns granted this same frame (stops two cars entering simultaneously with conflicting paths)
         if (turnsGrantedThisFrame.ContainsKey(intersection))
         {
             foreach (var grantedTurn in turnsGrantedThisFrame[intersection])
@@ -194,15 +171,12 @@ public class IntersectionManager
                 }
             }
         }
-        
-        // Check 4: Priority to right (ONLY if no traffic lights)
-        // If there are traffic lights, they handle priority phases
+
+        // Check 4: priority-to-right. Lit intersections handle priority via phases instead.
         if (!stopLights.ContainsKey(intersection))
         {
-            // Physics exemption: a car that can no longer stop at the line
-            // (the right-side car arrived at its stop line at the last moment)
-            // must not be forced into an instant stop - it proceeds, and the
-            // stationary right-side car waits one more turn via Check 3.
+            // A car already too close to stop can't be forced to brake instantly;
+            // it proceeds and the yielding car simply waits one more cycle (Check 3 still applies).
             float distanceToLine = fromLane.Length - car.DistanceAlongPath;
             float minStoppingDistance = (car.CurrentSpeed * car.CurrentSpeed) / (2f * car.MaxBraking * 0.85f);
             bool physicallyCommitted = distanceToLine < minStoppingDistance;
@@ -218,8 +192,7 @@ public class IntersectionManager
     }
     
     /// <summary>
-    /// Get the current light state for a specific lane at an intersection.
-    /// Returns Green if no light exists.
+    /// Green if the intersection has no light.
     /// </summary>
     public StopLightController.LightState GetLightState(Node intersection, Lane lane)
     {
@@ -229,10 +202,7 @@ public class IntersectionManager
         }
         return StopLightController.LightState.Green;
     }
-    
-    /// <summary>
-    /// Check if a node has a traffic light controller.
-    /// </summary>
+
     public bool HasTrafficLight(Node intersection)
     {
         return stopLights.ContainsKey(intersection);
@@ -288,18 +258,14 @@ public class IntersectionManager
         }
     }
 
-    /// <summary>
-    /// Check whether this car is the designated deadlock breaker for the node.
-    /// </summary>
     public bool IsDeadlockBreaker(CarController car, Node intersection)
     {
         return carBreakingDeadlock.ContainsKey(intersection) && carBreakingDeadlock[intersection] == car;
     }
 
     /// <summary>
-    /// Clear all per-car state (queues, crossings, breakers, commitments).
-    /// Must be called when cars are despawned, otherwise destroyed references
-    /// left in the queues permanently block their lanes.
+    /// Clears all per-car state. Must be called on despawn, or a destroyed
+    /// car's reference lingers in a queue and permanently blocks that lane.
     /// </summary>
     public void ResetCarState()
     {
@@ -341,8 +307,8 @@ public class IntersectionManager
     }
     
     /// <summary>
-    /// Grant entry permission to a car (call this when CanEnter returns true and car will enter).
-    /// This tracks the granted turn for same-frame conflict detection.
+    /// Records a granted turn for same-frame conflict detection (Check 3.5).
+    /// Call after CanEnter returns true and the car will actually enter.
     /// </summary>
     public void GrantEntry(CarController car, Node intersection, TurnCurve turn)
     {
@@ -352,9 +318,9 @@ public class IntersectionManager
             turnsGrantedThisFrame[intersection].Add(turn);
         }
     }
-    
+
     /// <summary>
-    /// Register a car entering an intersection.
+    /// Marks the car as crossing; also fulfills any run-light commitment and clears it as the deadlock breaker.
     /// </summary>
     public void RegisterEntry(CarController car, Node intersection, TurnCurve turn)
     {
@@ -363,30 +329,25 @@ public class IntersectionManager
             Debug.LogWarning($"[IntersectionManager] Cannot register entry - no state for Node {intersection.ID}");
             return;
         }
-        
+
         var state = intersectionStates[intersection];
         state.activeCrossings[car] = turn;
 
-        // Also track in per-frame grants if not already there
+        // covers callers that call RegisterEntry without a prior GrantEntry
         if (carsGrantedThisFrame.ContainsKey(intersection))
         {
             carsGrantedThisFrame[intersection].Add(car);
             turnsGrantedThisFrame[intersection].Add(turn);
         }
 
-        // Any run-light commitment is fulfilled by actually entering
         CancelRunLight(car, intersection);
 
-        // Clear deadlock breaker if this car was it
         if (carBreakingDeadlock[intersection] == car)
         {
             carBreakingDeadlock[intersection] = null;
         }
     }
-    
-    /// <summary>
-    /// Register a car exiting an intersection.
-    /// </summary>
+
     public void RegisterExit(CarController car, Node intersection)
     {
         if (!intersectionStates.ContainsKey(intersection))
@@ -394,27 +355,20 @@ public class IntersectionManager
             Debug.LogWarning($"[IntersectionManager] Cannot register exit - no state for Node {intersection.ID}");
             return;
         }
-        
+
         var state = intersectionStates[intersection];
         state.activeCrossings.Remove(car);
-        
-        // Debug.Log($"Car {car.CarID}: Exited intersection at Node {intersection.ID}");
     }
-    
-    /// <summary>
-    /// Check if there are any cars waiting at the given intersection.
-    /// Used for pre-approach queue detection.
-    /// </summary>
+
     public bool HasWaitingCars(Node intersection)
     {
         if (!intersectionStates.ContainsKey(intersection))
         {
             return false;
         }
-        
+
         var state = intersectionStates[intersection];
-        
-        // Check if any lane has waiting cars that are actually at the stop line
+
         foreach (var queueKvp in state.waitingQueues)
         {
             foreach (var car in queueKvp.Value)
@@ -431,8 +385,7 @@ public class IntersectionManager
     }
     
     /// <summary>
-    /// Check if there are cars waiting specifically on the given lane at the intersection.
-    /// More precise than HasWaitingCars for deciding when to brake.
+    /// Same "actually stopped" check as HasWaitingCars, but scoped to a single lane.
     /// </summary>
     public bool HasWaitingCarsOnLane(Lane lane, Node intersection)
     {
@@ -440,17 +393,16 @@ public class IntersectionManager
         {
             return false;
         }
-        
+
         var state = intersectionStates[intersection];
-        
+
         if (!state.waitingQueues.ContainsKey(lane))
         {
             return false;
         }
-        
+
         var queue = state.waitingQueues[lane];
-        
-        // Check if there's a car ahead of us on this lane that's actually stopped
+
         foreach (var car in queue)
         {
             if (car.CurrentCarState == CarController.CarState.WaitingToEnter)
@@ -463,8 +415,7 @@ public class IntersectionManager
     }
     
     /// <summary>
-    /// Check if there are multiple cars approaching the same intersection (within detection radius).
-    /// Returns true if 2+ cars are converging, indicating potential congestion.
+    /// True if at least 2 cars total (excludeCar plus 1+ others) are approaching within radius.
     /// </summary>
     public bool HasApproachingCars(Node intersection, CarController excludeCar, float detectionRadius)
     {
@@ -472,94 +423,82 @@ public class IntersectionManager
         {
             return false;
         }
-        
+
         Vector3 intersectionPos = intersection.Position;
         int approachingCount = 0;
-        
-        // Find all cars in the simulation
+
         CarController[] allCars = UnityEngine.Object.FindObjectsOfType<CarController>();
-        
+
         foreach (var car in allCars)
         {
-            // Skip the car we're checking for
             if (car == excludeCar)
                 continue;
-            
-            // Check if car is within detection radius of intersection
+
             float distance = Vector3.Distance(car.transform.position, intersectionPos);
-            
+
             if (distance <= detectionRadius)
             {
-                // Check if this car is actually heading towards this intersection
-                // (either in Approaching state targeting this node, or on a lane that ends at this node)
+                // Heading here means either still approaching this node, or already on a lane that ends here
                 bool isHeadingToIntersection = false;
-                
-                if (car.CurrentCarState == CarController.CarState.Approaching && 
-                    car.CurrentLane != null && 
+
+                if (car.CurrentCarState == CarController.CarState.Approaching &&
+                    car.CurrentLane != null &&
                     car.CurrentLane.EndNode == intersection)
                 {
                     isHeadingToIntersection = true;
                 }
-                else if (car.CurrentCarState == CarController.CarState.OnLane && 
+                else if (car.CurrentCarState == CarController.CarState.OnLane &&
                          car.CurrentPathType == CarController.PathType.Lane &&
-                         car.CurrentLane != null && 
+                         car.CurrentLane != null &&
                          car.CurrentLane.EndNode == intersection)
                 {
                     isHeadingToIntersection = true;
                 }
-                
+
                 if (isHeadingToIntersection)
                 {
                     approachingCount++;
-                    
-                    // If we find at least 1 other car approaching, return true
-                    // (2+ cars total including the excludeCar)
+
+                    // approachingCount excludes excludeCar, so >=1 here means 2+ total
                     if (approachingCount >= 1)
                         return true;
                 }
             }
         }
-        
+
         return false;
     }
-    
-    /// <summary>
-    /// Add a car to the waiting queue for an intersection approach.
-    /// </summary>
+
     public void UpdateCarWaitingAt(CarController car, Lane lane, Node intersection)
     {
         if (!intersectionStates.ContainsKey(intersection))
         {
             return;
         }
-        
+
         var state = intersectionStates[intersection];
-        
+
         if (!state.waitingQueues.ContainsKey(lane))
         {
             state.waitingQueues[lane] = new Queue<CarController>();
         }
-        
-        // Only add if not already in queue. Wait timing for deadlock detection
-        // is recorded later, when the car is actually stuck at the stop line.
+
+        // Dedup only; the wait timer for deadlock detection starts later, once actually stuck at the line
         if (!state.waitingQueues[lane].Contains(car))
         {
             state.waitingQueues[lane].Enqueue(car);
         }
     }
-    
-    /// <summary>
-    /// Remove a car from the waiting queue.
-    /// </summary>
+
     public void RemoveCarWaitingAt(CarController car, Lane lane, Node intersection)
     {
         if (!intersectionStates.ContainsKey(intersection))
         {
             return;
         }
-        
+
         var state = intersectionStates[intersection];
-        
+
         if (state.waitingQueues.ContainsKey(lane))
         {
             var queue = state.waitingQueues[lane];
@@ -571,27 +510,23 @@ public class IntersectionManager
             {
                 queue.Dequeue();
                 state.ClearWaitStartTime(car);
-                // Debug.Log($"Car {car.CarID}: Removed from waiting queue at Node {intersection.ID}");
             }
         }
     }
-    
+
     /// <summary>
-    /// Check if entire intersection is deadlocked and designate one car to break it.
-    /// Only ONE car at a time is allowed to force entry.
+    /// Designates at most one car at a time to force entry once the whole intersection is deadlocked.
     /// </summary>
     private void CheckAndBreakDeadlock(Node intersection, IntersectionState state, CarController requestingCar)
     {
-        // Signalized intersections are cleared by the light cycle and must
-        // never be forced: a breaker designated during a long red would later
-        // bypass the conflict checks the moment its phase turns green.
+        // Never force entry at a signalized intersection: a breaker picked during a long
+        // red would bypass conflict checks the moment its phase turns green.
         if (stopLights.ContainsKey(intersection))
         {
             return;
         }
 
-        // Keep the current breaker unless it failed to enter within the
-        // timeout (e.g. its exit lane is blocked) - then try another car
+        // Keep the current breaker unless it timed out without entering (e.g. blocked exit) - then pick a new one
         CarController currentBreaker = carBreakingDeadlock[intersection];
         if (currentBreaker != null)
         {
@@ -602,7 +537,6 @@ public class IntersectionManager
         }
         carBreakingDeadlock[intersection] = null;
 
-        // If someone is actively crossing, no deadlock
         bool anyActiveCrossing = false;
         foreach (var crossing in state.activeCrossings)
         {
@@ -617,10 +551,9 @@ public class IntersectionManager
             return;
         }
 
-        // Collect all first-in-queue cars stuck at (or crawling near) the stop
-        // line. Cross-boundary following means a blocked head can stop a few
-        // units short of the line while still Approaching, so state alone
-        // isn't enough to detect it.
+        // First-in-queue cars stuck at, or crawling just short of, the stop line.
+        // A blocked head can stall a few units early while still "Approaching",
+        // so CarState alone doesn't catch it (see IsStuckAtStopLine).
         List<CarController> waitingCars = new List<CarController>();
         float earliestWaitTime = float.MaxValue;
         CarController longestWaitingCar = null;
@@ -641,12 +574,11 @@ public class IntersectionManager
             CarController firstCar = queue.Peek();
             if (!IsStuckAtStopLine(firstCar))
             {
-                state.ClearWaitStartTime(firstCar); // moving again - reset timer
+                state.ClearWaitStartTime(firstCar);
                 continue;
             }
 
-            // Wait timing starts when the car actually gets stuck, not when it
-            // enters the detection ring 25 units out
+            // Wait timer starts once actually stuck, not when it first enters the detection ring
             state.RecordWaitStartTime(firstCar, currentTime);
 
             waitingCars.Add(firstCar);
@@ -663,9 +595,8 @@ public class IntersectionManager
             return;
         }
 
-        // Two stuck approaches after the timeout is a classic mutual deadlock;
-        // a single stuck approach (e.g. blocked by a jam that loops through
-        // other intersections) gets forced through after twice the timeout.
+        // Two stuck approaches after the timeout is a mutual deadlock; a single stuck
+        // approach (e.g. a jam looping through other intersections) waits twice as long.
         float requiredWait = waitingCars.Count >= 2 ? deadlockTimeout : deadlockTimeout * 2f;
 
         foreach (var car in waitingCars)
@@ -684,8 +615,7 @@ public class IntersectionManager
     }
 
     /// <summary>
-    /// True if the car is effectively parked at the intersection entrance
-    /// (either formally waiting, or stopped just short of the stop line).
+    /// True if formally waiting, or stopped/crawling just short of the stop line.
     /// </summary>
     private bool IsStuckAtStopLine(CarController car)
     {
@@ -701,49 +631,11 @@ public class IntersectionManager
         float distanceToStopLine = car.CurrentLane.Length - car.DistanceAlongPath;
         return car.CurrentSpeed < 0.5f && distanceToStopLine < detectionDistance;
     }
-    
-    // /// <summary>
-    // /// Log detailed intersection state for debugging deadlocks (Node 7 only).
-    // /// </summary>
-    // private void LogIntersectionState(Node intersection, IntersectionState state)
-    // {
-    //     if (intersection.ID != 7) return; // Only log Node 7
-    //     
-    //     Debug.Log($"[NODE-7] === STATE: {state.incomingLanes.Count} incoming lanes ===");
-    //     
-    //     // Log active crossings
-    //     Debug.Log($"[NODE-7] Active crossings: {state.activeCrossings.Count}");
-    //     foreach (var crossing in state.activeCrossings)
-    //     {
-    //         Debug.Log($"[NODE-7]   - Car {crossing.Key.CarID} (state: {crossing.Key.CurrentCarState}) from Lane {crossing.Value.FromLane.ID} to Lane {crossing.Value.ToLane.ID}");
-    //     }
-    //     
-    //     // Log waiting queues
-    //     int totalWaiting = 0;
-    //     foreach (var queueKvp in state.waitingQueues)
-    //     {
-    //         if (queueKvp.Value.Count > 0)
-    //         {
-    //             totalWaiting += queueKvp.Value.Count;
-    //             var queueList = new System.Collections.Generic.List<CarController>(queueKvp.Value);
-    //             string carList = string.Join(", ", queueList.ConvertAll(c => $"Car{c.CarID}({c.CurrentCarState})"));
-    //             Debug.Log($"[NODE-7] Waiting on Lane {queueKvp.Key.ID}: {queueKvp.Value.Count} cars [{carList}]");
-    //         }
-    //     }
-    //     
-    //     if (totalWaiting == 0)
-    //     {
-    //         Debug.Log($"[NODE-7] No cars waiting");
-    //     }
-    // }
-    
+
     /// <summary>
-    /// Check if there's a vehicle on the right with priority.
-    /// Uses cross product to determine spatial relationship.
-    /// Yields to a right-side queue head that is either at its stop line
-    /// (WaitingToEnter) OR close and still approaching - the real rule recognises
-    /// an approaching car (blinker on) well before it stops, not the instant it
-    /// reaches the line. Only yields when the two paths actually cross.
+    /// True if a right-side queue head has priority: it must be at its stop
+    /// line or close and approaching (not only fully stopped), and its path
+    /// must actually cross ours.
     /// </summary>
     private bool HasPriorityVehicleOnRight(CarController requestingCar, Lane fromLane, Node node, out int blockingCarID)
     {
@@ -761,11 +653,9 @@ public class IntersectionManager
         {
             if (incomingLane == fromLane) continue;
 
-            // Get direction of other lane
             Vector3 otherDir = (incomingLane.EndPosition - incomingLane.StartPosition).normalized;
 
-            // Cross product: NEGATIVE Y means other lane is to our right (clockwise)
-            // Positive Y means left (counter-clockwise)
+            // cross.y negative = other lane is to our right (clockwise)
             float cross = Vector3.Cross(carDirection, otherDir).y;
             if (cross >= -0.1f) continue; // not on our right
 
@@ -780,8 +670,6 @@ public class IntersectionManager
             CarController carOnRight = queue.Peek();
             if (carOnRight == null) continue;
 
-            // Recognise the right-side car if it is at its line, or approaching and
-            // near it - not only fully stopped cars.
             bool atLine = carOnRight.CurrentCarState == CarController.CarState.WaitingToEnter;
             bool nearAndApproaching = false;
             if (carOnRight.CurrentCarState == CarController.CarState.Approaching)
@@ -793,19 +681,15 @@ public class IntersectionManager
             if (!atLine && !nearAndApproaching) continue;
 
             TurnCurve theirTurn = carOnRight.IntendedTurn;
-            // Turn-type priority overrides priority-to-right: a higher-priority
-            // movement (straight over right/left, right over left) does not yield to
-            // a lower-priority car merely because it is on the right - that car must
-            // yield to us by turn type instead. Equal or higher priority still
-            // follows priority-to-right below.
+            // A higher-priority turn (straight > right > left) always wins, even against
+            // a car on our right; equal-or-higher turns still yield via priority-to-right below.
             if (theirTurn != null && requestingCar.IntendedTurn != null &&
                 TurnPriority(theirTurn.Type) < TurnPriority(requestingCar.IntendedTurn.Type))
             {
                 continue;
             }
-            // Only give way when their path actually crosses ours. Both turns are
-            // pre-selected by the time a car is Approaching; if the turn is somehow
-            // unknown, yield to stay safe.
+            // Only yield if their path actually crosses ours; if either turn is somehow
+            // still unknown, yield to be safe (both should be pre-selected by Approaching).
             if (theirTurn != null && requestingCar.IntendedTurn != null &&
                 !TurnsConflict(requestingCar.IntendedTurn, theirTurn))
             {
@@ -820,9 +704,7 @@ public class IntersectionManager
     }
 
     /// <summary>
-    /// Right-of-way rank of a turn type: straight (2) beats right (1) beats
-    /// left (0). Priority-to-right only applies between equal-or-higher ranks;
-    /// a lower-rank car on the right must yield by turn type instead.
+    /// Right-of-way rank of a turn type: straight (2) beats right (1) beats left (0).
     /// </summary>
     private static int TurnPriority(TurnCurve.TurnType type)
     {
@@ -836,9 +718,8 @@ public class IntersectionManager
     /// </summary>
     private void BuildTurnConflictMap()
     {
-        // Collect all turn curves from all intersections
         List<TurnCurve> allTurns = new List<TurnCurve>();
-        
+
         foreach (var state in intersectionStates.Values)
         {
             foreach (var lane in state.incomingLanes)
@@ -846,91 +727,71 @@ public class IntersectionManager
                 allTurns.AddRange(lane.AvailableTurns);
             }
         }
-        
-        // Debug.Log($"IntersectionManager: Analyzing {allTurns.Count} turn curves for conflicts");
-        
-        // Check each pair of turns at the same intersection
+
         for (int i = 0; i < allTurns.Count; i++)
         {
             TurnCurve turnA = allTurns[i];
-            
+
             if (!turnConflicts.ContainsKey(turnA))
             {
                 turnConflicts[turnA] = new HashSet<TurnCurve>();
             }
-            
+
             for (int j = i + 1; j < allTurns.Count; j++)
             {
                 TurnCurve turnB = allTurns[j];
 
-                // Only check turns at the same intersection
                 if (turnA.FromLane.EndNode != turnB.FromLane.EndNode)
                 {
                     continue;
                 }
 
-                // Turns leaving from the same lane share a start point but can
-                // never be active side by side out of order: queue order and
-                // car-following already serialize those cars. Marking them as
-                // conflicts would force one-car-at-a-time flow through greens.
+                // Turns from the same lane are already serialized by queue order and
+                // car-following; marking them as conflicts would force one-car-at-a-time
+                // flow through a green light needlessly.
                 if (turnA.FromLane == turnB.FromLane)
                 {
                     continue;
                 }
 
-                // Two turns are only compatible (safe to run together) when their
-                // sampled paths don't actually cross - so opposite-approach left
-                // turns proceed simultaneously exactly when their arcs stay clear,
-                // and are serialized when the arcs overlap. The honest geometric
-                // check below is the single source of truth; there is no turn-type
-                // exemption, because exempting a genuinely-crossing pair would let
-                // two cars drive through the same point at once.
-
-                // Check if they conflict
+                // Turns conflict only if their sampled paths actually cross - no turn-type
+                // exemption. Opposite-approach lefts run together only when their arcs stay clear.
                 if (TurnCurvesConflict(turnA, turnB))
                 {
                     turnConflicts[turnA].Add(turnB);
-                    
+
                     if (!turnConflicts.ContainsKey(turnB))
                     {
                         turnConflicts[turnB] = new HashSet<TurnCurve>();
                     }
                     turnConflicts[turnB].Add(turnA);
-                    
-                    // Debug.Log($"Conflict detected: Turn {turnA.FromLane.ID}->{turnA.ToLane.ID} conflicts with {turnB.FromLane.ID}->{turnB.ToLane.ID}");
                 }
             }
         }
     }
-    
+
     /// <summary>
-    /// Check if two turn curves conflict using line segment intersection.
+    /// Approximates each curve as line segments (see SampleCurve) and tests those for intersection.
     /// </summary>
     private bool TurnCurvesConflict(TurnCurve a, TurnCurve b)
     {
-        // Sample points along both curves
         List<Vector3> pointsA = SampleCurve(a, 10);
         List<Vector3> pointsB = SampleCurve(b, 10);
-        
-        // Check each segment pair for intersection
+
         for (int i = 0; i < pointsA.Count - 1; i++)
         {
             for (int j = 0; j < pointsB.Count - 1; j++)
             {
-                // Check 2D intersection (XZ plane)
                 if (LineSegmentsIntersect2D(pointsA[i], pointsA[i+1], pointsB[j], pointsB[j+1]))
                 {
                     return true;
                 }
             }
         }
-        
+
         return false;
     }
-    
-    /// <summary>
-    /// Sample points along a turn curve.
-    /// </summary>
+
     private List<Vector3> SampleCurve(TurnCurve curve, int samples)
     {
         List<Vector3> points = new List<Vector3>();
@@ -945,7 +806,7 @@ public class IntersectionManager
     }
     
     /// <summary>
-    /// Check if two line segments intersect in 2D (XZ plane).
+    /// Segment intersection in the XZ ground plane; height (Y) is ignored.
     /// </summary>
     private bool LineSegmentsIntersect2D(Vector3 p1, Vector3 p2, Vector3 p3, Vector3 p4)
     {
@@ -974,25 +835,19 @@ public class IntersectionManager
     }
 }
 
-/// <summary>
-/// State tracking for a single intersection.
-/// </summary>
 public class IntersectionState
 {
     public Node Node;
-    
-    // Cars currently crossing through intersection (mapped to their turn curve)
+
     public Dictionary<CarController, TurnCurve> activeCrossings;
-    
-    // Cars waiting to enter, organized by incoming lane
+
     public Dictionary<Lane, Queue<CarController>> waitingQueues;
-    
-    // Cached list of incoming lanes for this intersection
+
     public List<Lane> incomingLanes;
-    
-    // Track wait start times for deadlock detection
+
+    // Wait start times, used for deadlock detection
     private Dictionary<CarController, float> waitStartTimes;
-    
+
     public IntersectionState(Node node)
     {
         Node = node;
@@ -1000,8 +855,7 @@ public class IntersectionState
         waitingQueues = new Dictionary<Lane, Queue<CarController>>();
         incomingLanes = new List<Lane>();
         waitStartTimes = new Dictionary<CarController, float>();
-        
-        // Build list of incoming lanes (lanes that end at this node)
+
         foreach (var road in node.ConnectedRoads)
         {
             if (road.ForwardLane.EndNode == node)
