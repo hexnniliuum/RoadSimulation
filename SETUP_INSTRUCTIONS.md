@@ -100,7 +100,8 @@ The `RoadNetworkGenerator` executes the following passes sequentially:
     *   Removes random nodes/roads based on configuration.
     *   **Connectivity Check**: Uses BFS to ensure the graph remains fully connected.
     *   **Dead-end Removal**: Iteratively removes nodes with degree < 2.
-    *   **Sharp Angle Cleanup**: Removes roads creating unresolvable acute angles (< 20°).
+    *   **Sharp Angle Cleanup**: Removes roads creating unresolvable acute angles (< 20°), trying the shorter then the longer road of each sharp pair.
+    *   **Width-aware Repair** (`ValidateAndRepairTopology`, final safety net before bridges): removes any remaining "impossible intersection" geometry the earlier passes let through at high jitter — sub-20° spikes, roads whose centreline passes within ~2.5 lane-widths of an unrelated node, and un-bridgeable at-grade lane overlaps (segment-to-segment distance below road width). Removals are connectivity-guarded (they may leave dead-ends, cleaned afterwards, but never disconnect the graph); genuine bridgeable crossings are left for the next pass. At extreme jitter this can thin the network to keep it valid.
 4.  **Bridge Generation**:
     *   Identifies intersecting road segments after all removals.
     *   Validates crossing constraints (angle > 35°, ramp room, distance from nodes) — tried from both roads' perspectives; whichever can carry the bridge gets it. Crossings neither road can bridge are logged as warnings.
@@ -112,8 +113,9 @@ The `RoadNetworkGenerator` executes the following passes sequentially:
     *   **Length Calculation**: Numerical integration for accurate 3D arc length on bridge lanes.
 6.  **Turn Precomputation**:
     *   Generates quadratic Bézier curves for all valid lane connectors (U-turns excluded; turns sharper than 140° excluded, except a lane's least-sharp turn is always kept so no lane is left without an exit).
-    *   Each curve builds an arc-length table so cars traverse it at uniform world speed.
-    *   **Conflict Detection**: Pre-computes spatial overlaps between turn curves. Turns leaving from the same lane are never conflicts (queue order already serializes them); turns merging into the same lane are.
+    *   Each curve builds an arc-length table so cars traverse it at uniform world speed (rebuilt whenever a curve is reshaped).
+    *   **Opposite-Left Flattening** (`FlattenOverlappingOppositeLeftTurns`): left-turn pairs from near-opposite approaches (≥ ~120° apart, different exits) whose arcs cross or pass closer than a car width (2.0) are both flattened symmetrically — each control point is pulled toward its chord midpoint by the smallest factor (steps of 0.05, capped at 0.85) that yields ≥ 2.5 units of clearance — so both lefts can cross on the same green. Pairs that cannot be separated (in practice: one turn exits onto the road the other approaches from, so the paths must cross) are restored unchanged and stay serialized by conflict detection. Each flattened pair is logged (`Node X: flattened opposite-left pair ...`).
+    *   **Conflict Detection**: Pre-computes spatial overlaps between turn curves. Turns leaving from the same lane are never conflicts (queue order already serializes them); turns merging into the same lane are. There is no turn-type exemption — sampled arc crossing is the single source of truth, so opposite lefts run together exactly when their (flattened) arcs stay clear.
 
 ---
 
@@ -135,7 +137,7 @@ Each frame the target speed is the **minimum of independent constraints**, each 
 Speed adjusts toward the target with acceleration capped at `MaxAcceleration` and deceleration proportional to the speed error (up to `MaxBraking`). A last-resort emergency stop prevents ever moving into the car ahead.
 
 ### 6.3 Traffic Lights
-*   **Phasing**: Roads ~180° apart share a green phase; timing is fixed: Green (10s) → Yellow (3s) → all-red (2s).
+*   **Phasing**: Roads are grouped into green phases by maximum-cardinality matching over near-opposite pairs — two roads may share a phase when they are within 60° of a straight 180° (arms ≥120° apart), with ties broken toward the most-opposite pairing; a road with no eligible partner phases alone. Maximum matching (rather than the older greedy most-opposite-first pass) pairs every road that has an available opposite, so a skewed 4-way greens both of its true opposite pairs instead of soloing one, and a 3-road node greens the two opposite roads together and cycles the third solo. Timing is fixed: Green (10s) → Yellow (3s) → all-red (2s).
 *   **Yellow-light decision**: Made **once per approach** and latched. A car stops unless that would take more than ~85% of maximum braking; otherwise it requests a *run-light commitment* from the `IntersectionManager`, which grants it only if no conflicting car is crossing or already committed — so two conflicting approaches can never both run the same yellow. Committed cars pass the light gate and clear the intersection instead of being stopped dead at the line; refused cars brake hard (95% of max) and retry the commitment while the yellow lasts.
 *   A committed car that ends up stopped anyway (e.g. behind a queue) downgrades to a normal stop and waits for green.
 
@@ -144,11 +146,12 @@ Entry requires **all** of:
 1.  **Light gate**: green, or a valid run-light commitment.
 2.  **Queue order**: first in the lane's queue.
 3.  **No path conflict** with active crossings or same-frame grants (using the precomputed turn-conflict map).
-4.  **Priority-to-the-right** (unsignalized only): yields to a vehicle waiting at the stop line on the right — unless the requester physically can no longer stop, in which case it proceeds and the stationary car waits one more turn.
+4.  **Priority-to-the-right** (unsignalized only): yields to a conflicting vehicle on the right that is at its stop line **or close and still approaching** (within ~60% of the detection distance, or nearer its line than the requester is to its own) — the rule fires for an approaching car, not only a fully stopped one. A strictly higher-priority movement is exempt: it does not give way priority-to-the-right to a lower-priority one (e.g. a straight or right does not yield to a left on its right). Waived if the requester physically can no longer stop, in which case it proceeds and the other car waits one more turn.
 5.  **Don't block the box**: the destination lane must have room for the car to fully exit (cars still crossing toward that lane reserve space).
-6.  **Yield rule**: entry is deferred while a conflicting car is bearing down on the intersection too fast to stop (the permissive-left pattern).
+6.  **Yield rule**: entry is deferred while a conflicting car is bearing down on the intersection too fast to stop.
+7.  **Turn-type priority (permissive left)**: turn movements rank straight > right > left, and a car gives way to any conflicting movement of strictly higher rank from any approach (so a left yields to conflicting straights and rights; a right yields to conflicting straights). It yields while that higher-priority car is within the detection distance of its stop line at **any** speed — so it never cuts in front of a stopped or queued car — or is farther out but arriving within ~3 s, and is entitled to move (green, or unsignalized); it gives way regardless of whether it could brake, so a turn never cuts in front of higher-priority traffic. Opposite-approach left turns whose (flattened) arcs stay clear are not conflicts, so two facing left-turners proceed together; pairs whose arcs still cross remain serialized.
 
-Rules 5-6 are waived for cars that physically cannot stop anymore (they enter and, if needed, wait on the turn curve) and for the deadlock breaker.
+Rules 5-7 are waived for cars that physically cannot stop anymore (they enter and, if needed, wait on the turn curve) and for the deadlock breaker.
 
 ### 6.5 Deadlock Resolution (unsignalized intersections only)
 Queue heads stuck at or crawling near the stop line are timed from the moment they actually stop. If two or more approaches are stuck past `DeadlockTimeout` (or one approach past twice that), the longest-waiting car is forced through, bypassing the arbitration rules. A breaker that fails to enter within the timeout expires and another car is chosen. Signalized intersections are never forced — the light cycle clears them.
@@ -207,9 +210,11 @@ Healthy runs show hard-braking events (decel > 25 u/s²) in the single digits pe
 ## 10. Known Issues & Limitations
 
 ### Identified Defects
-*   **Topology Generation**: High jitter values can still produce overlapping roads and intersection generation errors (warnings are logged when safeguards fire).
-*   **Right of Way**: Priority is sometimes overridden — deadlock breaking, run-light commitments, and the cannot-stop physics exemptions supersede normal right-of-way order by design, which can read as rule violations.
-*   **Turn Geometry**: Turn arcs through an intersection can overlap; sharp turns may bulge outside the intersection footprint (the sharp-turn Bézier control point is allowed up to 3× the endpoint gap).
+*   **Topology Generation**: The width-aware repair pass (§5, step 3) removes overlapping/grazing/spike geometry from the final graph. At extreme jitter (well above segment length) it may thin the network to keep it valid; lower `IntersectionJitter` or raise segment lengths for denser maps.
+*   **Right of Way**: Priority is still sometimes overridden by design — deadlock breaking, run-light commitments, and the cannot-stop physics exemptions supersede normal right-of-way order, which can read as rule violations.
+*   **Turn Geometry**: Sharp turns may still bulge outside the intersection footprint (the sharp-turn Bézier control point is allowed up to 3× the endpoint gap).
+*   **Flattened-Turn Tangent Discontinuity**: opposite-left flattening (§5, step 6) moves the Bézier control point off the lane-direction rays, so a flattened curve's tangent no longer matches the lane heading at the turn's entry and exit — cars visibly snap their heading when entering/leaving such a turn. Fixing this needs a curve with more degrees of freedom (e.g. a cubic with endpoint-tangent constraints) rather than a repositioned quadratic control point.
+*   **Stationary turn priority at signals**: when a whole green phase releases from a stop, a lower-priority turn (typically a left) can enter ahead of a conflicting straight/right it should yield to. The turn-type yield of §6.4 rule 7 is computed correctly, but for a car already stopped at the line the cannot-stop escape hatch in `CanProceedIntoIntersection` returns true (`distanceToStop < minStoppingDistance` holds trivially at zero speed) and admits it anyway, and turn-type priority is not otherwise enforced in the manager's entry gate — so among co-phase cars entry order is effectively first-processed-wins. Intermittent (depends on the exact stop position and per-car update order); currently unfixed.
 
 ### Simulation Constraints
 *   **Interaction**: Editor-only (Scene view + Inspector); no runtime UI.

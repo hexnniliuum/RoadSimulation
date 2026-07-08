@@ -740,54 +740,97 @@ public class IntersectionManager
     /// <summary>
     /// Check if there's a vehicle on the right with priority.
     /// Uses cross product to determine spatial relationship.
-    /// ONLY checks cars that are ACTUALLY at the stop line (WaitingToEnter state).
+    /// Yields to a right-side queue head that is either at its stop line
+    /// (WaitingToEnter) OR close and still approaching - the real rule recognises
+    /// an approaching car (blinker on) well before it stops, not the instant it
+    /// reaches the line. Only yields when the two paths actually cross.
     /// </summary>
     private bool HasPriorityVehicleOnRight(CarController requestingCar, Lane fromLane, Node node, out int blockingCarID)
     {
         blockingCarID = -1;
         var state = intersectionStates[node];
-        
+
         Vector3 carDirection = (fromLane.EndPosition - fromLane.StartPosition).normalized;
-        
+        float myDistanceToLine = fromLane.Length - requestingCar.DistanceAlongPath;
+
+        // A right-side car counts as "approaching" once it is within this distance of
+        // its own stop line (or is already closer to its line than we are to ours).
+        float approachHorizon = detectionDistance * 0.6f;
+
         foreach (var incomingLane in state.incomingLanes)
         {
             if (incomingLane == fromLane) continue;
-            
+
             // Get direction of other lane
             Vector3 otherDir = (incomingLane.EndPosition - incomingLane.StartPosition).normalized;
-            
+
             // Cross product: NEGATIVE Y means other lane is to our right (clockwise)
             // Positive Y means left (counter-clockwise)
             float cross = Vector3.Cross(carDirection, otherDir).y;
-            
-            if (cross < -0.1f) // On right side (negative = clockwise)
+            if (cross >= -0.1f) continue; // not on our right
+
+            if (!state.waitingQueues.ContainsKey(incomingLane)) continue;
+            var queue = state.waitingQueues[incomingLane];
+            while (queue.Count > 0 && queue.Peek() == null)
             {
-                // CRITICAL FIX: Only check cars that are ACTUALLY at the stop line
-                // Not cars that are still approaching (25+ units away)
-                if (state.waitingQueues.ContainsKey(incomingLane))
-                {
-                    var queue = state.waitingQueues[incomingLane];
-                    if (queue.Count > 0)
-                    {
-                        CarController carOnRight = queue.Peek();
-                        
-                        // ONLY yield to cars that are actually at the stop line (WaitingToEnter)
-                        // Don't yield to cars still approaching (Approaching state)
-                        // Don't yield to cars already crossing (Crossing state)
-                        if (carOnRight != null &&
-                            carOnRight.CurrentCarState == CarController.CarState.WaitingToEnter)
-                        {
-                            blockingCarID = carOnRight.CarID;
-                            return true; // Vehicle on right at stop line has priority
-                        }
-                    }
-                }
+                queue.Dequeue(); // drop cars destroyed while queued
             }
+            if (queue.Count == 0) continue;
+
+            CarController carOnRight = queue.Peek();
+            if (carOnRight == null) continue;
+
+            // Recognise the right-side car if it is at its line, or approaching and
+            // near it - not only fully stopped cars.
+            bool atLine = carOnRight.CurrentCarState == CarController.CarState.WaitingToEnter;
+            bool nearAndApproaching = false;
+            if (carOnRight.CurrentCarState == CarController.CarState.Approaching)
+            {
+                float theirDistanceToLine = incomingLane.Length - carOnRight.DistanceAlongPath;
+                nearAndApproaching = theirDistanceToLine <= approachHorizon ||
+                                     theirDistanceToLine <= myDistanceToLine;
+            }
+            if (!atLine && !nearAndApproaching) continue;
+
+            TurnCurve theirTurn = carOnRight.IntendedTurn;
+            // Turn-type priority overrides priority-to-right: a higher-priority
+            // movement (straight over right/left, right over left) does not yield to
+            // a lower-priority car merely because it is on the right - that car must
+            // yield to us by turn type instead. Equal or higher priority still
+            // follows priority-to-right below.
+            if (theirTurn != null && requestingCar.IntendedTurn != null &&
+                TurnPriority(theirTurn.Type) < TurnPriority(requestingCar.IntendedTurn.Type))
+            {
+                continue;
+            }
+            // Only give way when their path actually crosses ours. Both turns are
+            // pre-selected by the time a car is Approaching; if the turn is somehow
+            // unknown, yield to stay safe.
+            if (theirTurn != null && requestingCar.IntendedTurn != null &&
+                !TurnsConflict(requestingCar.IntendedTurn, theirTurn))
+            {
+                continue; // paths don't cross - no need to yield
+            }
+
+            blockingCarID = carOnRight.CarID;
+            return true; // Vehicle on right has priority
         }
-        
+
         return false;
     }
-    
+
+    /// <summary>
+    /// Right-of-way rank of a turn type: straight (2) beats right (1) beats
+    /// left (0). Priority-to-right only applies between equal-or-higher ranks;
+    /// a lower-rank car on the right must yield by turn type instead.
+    /// </summary>
+    private static int TurnPriority(TurnCurve.TurnType type)
+    {
+        if (type == TurnCurve.TurnType.Straight) return 2;
+        if (type == TurnCurve.TurnType.Right) return 1;
+        return 0; // Left
+    }
+
     /// <summary>
     /// Pre-compute which turn curves conflict (intersect spatially).
     /// </summary>
@@ -834,6 +877,14 @@ public class IntersectionManager
                 {
                     continue;
                 }
+
+                // Two turns are only compatible (safe to run together) when their
+                // sampled paths don't actually cross - so opposite-approach left
+                // turns proceed simultaneously exactly when their arcs stay clear,
+                // and are serialized when the arcs overlap. The honest geometric
+                // check below is the single source of truth; there is no turn-type
+                // exemption, because exempting a genuinely-crossing pair would let
+                // two cars drive through the same point at once.
 
                 // Check if they conflict
                 if (TurnCurvesConflict(turnA, turnB))

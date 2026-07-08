@@ -69,6 +69,16 @@ public class CarController : MonoBehaviour
     private float INTERSECTION_DETECTION_DISTANCE = 25f;
     private float STOP_LINE_BUFFER = 0.5f;
 
+    // Turn-priority yield look-ahead: a yielding turn (left/right) gives way to a
+    // conflicting higher-priority car that is either already within
+    // INTERSECTION_DETECTION_DISTANCE of its stop line (any speed - includes cars
+    // stopped or queued at the line) OR arriving within this many seconds (a faster
+    // car still farther out). The near horizon is bound to the detection distance on
+    // purpose: a car inside it has entered its Approaching state, so yielding to it
+    // matches the pre-existing right-of-way behaviour exactly and cannot regress when
+    // the detection distance is reconfigured.
+    private const float YIELD_TIME_HORIZON = 3f; // seconds of look-ahead for fast, still-distant cars
+
     // Public properties for state access
     public float CurrentSpeed => currentSpeed;
     public Lane CurrentLane => currentLane;
@@ -76,6 +86,9 @@ public class CarController : MonoBehaviour
     public CarState CurrentCarState => currentState;
     public float DistanceAlongPath => distanceAlongPath;
     public PathType CurrentPathType => currentPathType;
+    // The turn this car pre-selected on approach (null until Approaching). Exposed so
+    // the IntersectionManager can apply turn-aware right-of-way before the car stops.
+    public TurnCurve IntendedTurn => intendedTurn;
 
     // True while this car has committed to continuing through a yellow light
     // and is still approaching the stop line (checked by IntersectionManager
@@ -303,7 +316,7 @@ public class CarController : MonoBehaviour
             return true;
         }
 
-        if (HasRoomBeyondTurn(intendedTurn) && !MustYieldToApproachingTraffic())
+        if (HasRoomBeyondTurn(intendedTurn) && !MustYieldToApproachingTraffic() && !MustYieldByTurnPriority())
         {
             return true;
         }
@@ -353,6 +366,119 @@ public class CarController : MonoBehaviour
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Turn-type right-of-way (right-hand traffic): straight beats right beats
+    /// left. A yielding movement (left, or right vs a straight) gives way to any
+    /// conflicting higher-priority car that is close enough to matter: either within
+    /// INTERSECTION_DETECTION_DISTANCE of its stop line at ANY speed (so we yield to
+    /// a stopped or crawling car queued at the line and never cut in front of it), or
+    /// arriving within YIELD_TIME_HORIZON seconds (so we also yield to a faster car
+    /// that is still farther out - the case the old state-gated check missed and let
+    /// a left cut in). We skip a car only when it is both beyond the detection
+    /// distance AND slower to arrive than the time horizon. A car that has not chosen
+    /// its turn yet (still OnLane) is treated by its worst plausible (highest-priority
+    /// conflicting) movement. Approach angle is irrelevant - only the turn types and
+    /// whether the paths actually cross. At a signal, cars held on a red phase are
+    /// ignored so we don't stall on our own green.
+    /// </summary>
+    private bool MustYieldByTurnPriority()
+    {
+        if (intendedTurn == null || targetIntersection == null)
+            return false;
+
+        int myPriority = TurnPriority(intendedTurn.Type);
+        if (myPriority >= 2)
+            return false; // a straight movement never yields by turn type
+
+        var manager = simulationManager.IntersectionManager;
+        bool signalized = manager.HasTrafficLight(targetIntersection);
+
+        var allCars = simulationManager.GetAllCars();
+        foreach (var car in allCars)
+        {
+            if (car == this || car == null)
+                continue;
+            if (car.currentPathType != PathType.Lane || car.currentLane == null)
+                continue;
+            if (car.currentLane == currentLane || car.currentLane.EndNode != targetIntersection)
+                continue;
+            // A car already in the box is handled by the active-crossing check in
+            // CanEnter; don't double-count it here.
+            if (car.currentState == CarState.Crossing)
+                continue;
+
+            // Consider this car only if it is close enough to matter: near the line
+            // at any speed (a stopped/queued higher-priority car we must not cut in
+            // front of) or arriving soon (a faster car still farther out). Skip it
+            // only when it is both beyond the detection distance and slow to arrive.
+            float theirDistToLine = car.currentLane.Length - car.distanceAlongPath;
+            float theirTimeToArrival = theirDistToLine / Mathf.Max(car.currentSpeed, 0.1f);
+            if (theirDistToLine > INTERSECTION_DETECTION_DISTANCE && theirTimeToArrival > YIELD_TIME_HORIZON)
+                continue; // genuinely far and not arriving soon - a large enough gap
+
+            // Only give way to a strictly higher-priority movement whose path
+            // crosses ours. An OnLane car has no chosen turn yet, so assume its
+            // worst plausible movement.
+            if (!HasHigherPriorityConflict(car, myPriority, manager))
+                continue;
+
+            // Ignore cars that aren't entitled to move (held at a red on a
+            // different phase); yielding to them would stall us on our own green.
+            if (signalized)
+            {
+                var theirLight = manager.GetLightState(targetIntersection, car.currentLane);
+                if (theirLight != StopLightController.LightState.Green && !car.IsCommittedToRunLight)
+                    continue;
+            }
+
+            return true; // a conflicting higher-priority car is close enough - yield
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="car"/> has (or, if it has not chosen a turn yet,
+    /// could have) a movement that both outranks our priority and crosses our
+    /// intended turn. OnLane cars have no assigned turn, so every turn their lane
+    /// offers is considered and the worst case wins - this is what stops a left
+    /// from ignoring a straight that simply has not started its approach yet.
+    /// </summary>
+    private bool HasHigherPriorityConflict(CarController car, int myPriority, IntersectionManager manager)
+    {
+        if (car.intendedTurn != null)
+        {
+            return TurnPriority(car.intendedTurn.Type) > myPriority
+                && manager.TurnsMayConflict(intendedTurn, car.intendedTurn);
+        }
+
+        if (car.currentLane.AvailableTurns == null)
+            return false;
+
+        foreach (var candidate in car.currentLane.AvailableTurns)
+        {
+            if (TurnPriority(candidate.Type) > myPriority
+                && manager.TurnsMayConflict(intendedTurn, candidate))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Right-of-way rank of a turn type: straight (2) beats right (1) beats
+    /// left (0). Used so left turns yield to straights and rights, and rights
+    /// yield to straights, independent of which approach they come from.
+    /// </summary>
+    private static int TurnPriority(TurnCurve.TurnType type)
+    {
+        if (type == TurnCurve.TurnType.Straight) return 2;
+        if (type == TurnCurve.TurnType.Right) return 1;
+        return 0; // Left
     }
 
     /// <summary>
