@@ -103,3 +103,6 @@ build/
 # Exception: Keep Unity package manifest files
 !/Packages/manifest.json
 !/Packages/packages-lock.json
+
+# Project temp files
+ToDo.md

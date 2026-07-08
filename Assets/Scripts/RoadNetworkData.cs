@@ -351,11 +351,16 @@ public class TurnCurve
         StartPoint = from.EndPosition;
         EndPoint = to.StartPosition;
 
-        // Determine turn type (using Y component of cross product for XZ plane)
+        // Determine turn type from the Y component of the cross product on the XZ
+        // plane. Unity is left-handed with +Y up, so for travel in XZ a clockwise
+        // turn (a right turn, e.g. forward +Z rotating toward right +X) yields a
+        // POSITIVE cross.y. Hence crossProduct > 0 is a right turn and < 0 a left
+        // turn. (This was previously inverted, which mislabelled every turn - and
+        // fed the wrong turn type into right-of-way rules and the gizmo colors.)
         Vector3 incomingDir = from.GetDirection();
         Vector3 outgoingDir = to.GetDirection();
         float crossProduct = Vector3.Cross(incomingDir, outgoingDir).y;
-        
+
         if (Mathf.Abs(crossProduct) < 0.1f)
         {
             Type = TurnType.Straight;
@@ -363,12 +368,12 @@ public class TurnCurve
         }
         else if (crossProduct > 0)
         {
-            Type = TurnType.Left;
+            Type = TurnType.Right;
             ControlPoint = CalculateControlPoint(StartPoint, EndPoint, incomingDir, outgoingDir, radius);
         }
         else
         {
-            Type = TurnType.Right;
+            Type = TurnType.Left;
             ControlPoint = CalculateControlPoint(StartPoint, EndPoint, incomingDir, outgoingDir, radius);
         }
 
@@ -451,6 +456,16 @@ public class TurnCurve
         
         intersection.y = start.y; // Maintain floor height
         return intersection;
+    }
+
+    /// <summary>
+    /// Replace the control point (reshaping the curve) and rebuild the cached
+    /// arc-length table so distance-based traversal stays uniform.
+    /// </summary>
+    public void SetControlPoint(Vector3 controlPoint)
+    {
+        ControlPoint = controlPoint;
+        BuildArcLengthTable();
     }
 
     private void BuildArcLengthTable()

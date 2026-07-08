@@ -40,9 +40,17 @@ public class RoadNetworkGenerator : MonoBehaviour
         connections = RemoveRandomRoads(connections);
         connections = RemoveDeadEndNodes(connections);
         
-        // Step 2.6: Remove roads that meet at very sharp angles (< 15 degrees)
+        // Step 2.6: Remove roads that meet at very sharp angles (< 20 degrees)
         connections = RemoveSharpAngleRoads(connections);
-        
+
+        // Step 2.65: Final width-aware repair. The earlier passes only reject some
+        // road categories and give up when their connectivity gate blocks a removal,
+        // so at high jitter the graph can still contain "impossible" geometry: sub-20°
+        // spikes at a node, roads grazing an unrelated intersection, and un-bridgeable
+        // at-grade crossings. This sweep removes what remains, guaranteeing the final
+        // network is clean (guarded so it never disconnects the graph).
+        connections = ValidateAndRepairTopology(connections);
+
         // Step 2.7: Create bridges for remaining crossings (after all removals)
         CreateBridges(connections);
         
@@ -54,7 +62,11 @@ public class RoadNetworkGenerator : MonoBehaviour
         
         // Step 5: Precompute turn curves
         PrecomputeTurnCurves();
-        
+
+        // Step 5.5: Reshape opposite left-turn arcs that overlap at skewed
+        // intersections, so the conflict map lets both lefts share a green
+        FlattenOverlappingOppositeLeftTurns();
+
         Debug.Log($"Generated road network: {roadMap.Nodes.Count} nodes, {roadMap.Roads.Count} roads");
         
         return roadMap;
@@ -783,6 +795,156 @@ public class RoadNetworkGenerator : MonoBehaviour
         }
     }
 
+    private void FlattenOverlappingOppositeLeftTurns()
+    {
+        // Opposite-approach left turns both bow through the central region of an
+        // intersection; at skewed nodes the two arcs can cross or pass closer than
+        // a car body, and the conflict map then (correctly) serializes the pair.
+        // Pulling both control points toward their chords by the same factor
+        // separates the arcs so both lefts can cross on the same green. Pairs that
+        // cannot be separated without degenerating into a near-straight diagonal
+        // are restored and left serialized.
+        const float oppositeApproachMaxDot = -0.5f; // approaches at least ~120° apart
+        const float triggerClearance = 2.0f;        // car width: closer than this, bodies overlap
+        const float targetClearance = 2.5f;         // flatten until bodies clear with margin
+        const float flattenStep = 0.05f;
+        const float maxFlatten = 0.85f;             // past this the arc reads as a straight diagonal cut
+
+        foreach (Node node in roadMap.Nodes)
+        {
+            List<TurnCurve> leftTurns = new List<TurnCurve>();
+            foreach (Road road in node.ConnectedRoads)
+            {
+                CollectLeftTurnsAtNode(road.ForwardLane, node, leftTurns);
+                CollectLeftTurnsAtNode(road.BackwardLane, node, leftTurns);
+            }
+
+            for (int i = 0; i < leftTurns.Count; i++)
+            {
+                for (int j = i + 1; j < leftTurns.Count; j++)
+                {
+                    TurnCurve a = leftTurns[i];
+                    TurnCurve b = leftTurns[j];
+
+                    // Same-lane turns are serialized by queue order, and turns
+                    // merging into the same lane can never be separated (shared
+                    // end point) - the conflict map handles both
+                    if (a.FromLane == b.FromLane || a.ToLane == b.ToLane)
+                        continue;
+                    if (Vector3.Dot(a.FromLane.GetDirection(), b.FromLane.GetDirection()) > oppositeApproachMaxDot)
+                        continue;
+                    if (MinCurveSeparation(a, b) >= triggerClearance)
+                        continue;
+
+                    Vector3 originalA = a.ControlPoint;
+                    Vector3 originalB = b.ControlPoint;
+                    Vector3 chordMidA = Vector3.Lerp(a.StartPoint, a.EndPoint, 0.5f);
+                    Vector3 chordMidB = Vector3.Lerp(b.StartPoint, b.EndPoint, 0.5f);
+
+                    bool cleared = false;
+                    for (float k = flattenStep; k <= maxFlatten + 0.001f; k += flattenStep)
+                    {
+                        a.SetControlPoint(Vector3.Lerp(originalA, chordMidA, k));
+                        b.SetControlPoint(Vector3.Lerp(originalB, chordMidB, k));
+
+                        if (MinCurveSeparation(a, b) >= targetClearance)
+                        {
+                            cleared = true;
+                            Debug.Log($"Node {node.ID}: flattened opposite-left pair " +
+                                      $"{a.FromLane.ID}->{a.ToLane.ID} / {b.FromLane.ID}->{b.ToLane.ID} (k={k:F2})");
+                            break;
+                        }
+                    }
+
+                    if (!cleared)
+                    {
+                        a.SetControlPoint(originalA);
+                        b.SetControlPoint(originalB);
+                    }
+                }
+            }
+        }
+    }
+
+    private void CollectLeftTurnsAtNode(Lane lane, Node node, List<TurnCurve> leftTurns)
+    {
+        // A lane's AvailableTurns all live at its end node
+        if (lane.EndNode != node)
+            return;
+
+        foreach (TurnCurve turn in lane.AvailableTurns)
+        {
+            if (turn.Type == TurnCurve.TurnType.Left)
+                leftTurns.Add(turn);
+        }
+    }
+
+    /// <summary>
+    /// Minimum XZ distance between two turn arcs, 0 if they cross. Samples each
+    /// curve at the same resolution as IntersectionManager.TurnCurvesConflict so
+    /// a pair separated here is guaranteed to pass the conflict map's check.
+    /// </summary>
+    private float MinCurveSeparation(TurnCurve a, TurnCurve b)
+    {
+        const int samples = 10;
+        Vector3[] pointsA = new Vector3[samples + 1];
+        Vector3[] pointsB = new Vector3[samples + 1];
+
+        for (int i = 0; i <= samples; i++)
+        {
+            float t = i / (float)samples;
+            pointsA[i] = a.GetPointOnCurve(t);
+            pointsB[i] = b.GetPointOnCurve(t);
+        }
+
+        float minDistance = float.MaxValue;
+        for (int i = 0; i < samples; i++)
+        {
+            for (int j = 0; j < samples; j++)
+            {
+                if (SegmentsIntersect2D(pointsA[i], pointsA[i + 1], pointsB[j], pointsB[j + 1]))
+                    return 0f;
+
+                minDistance = Mathf.Min(minDistance, PointToSegmentDistance2D(pointsA[i], pointsB[j], pointsB[j + 1]));
+                minDistance = Mathf.Min(minDistance, PointToSegmentDistance2D(pointsA[i + 1], pointsB[j], pointsB[j + 1]));
+                minDistance = Mathf.Min(minDistance, PointToSegmentDistance2D(pointsB[j], pointsA[i], pointsA[i + 1]));
+                minDistance = Mathf.Min(minDistance, PointToSegmentDistance2D(pointsB[j + 1], pointsA[i], pointsA[i + 1]));
+            }
+        }
+
+        return minDistance;
+    }
+
+    private bool SegmentsIntersect2D(Vector3 p1, Vector3 p2, Vector3 p3, Vector3 p4)
+    {
+        // Endpoint touches count as intersections, matching the inclusive test
+        // in IntersectionManager.LineSegmentsIntersect2D
+        float denom = (p1.x - p2.x) * (p3.z - p4.z) - (p1.z - p2.z) * (p3.x - p4.x);
+
+        if (Mathf.Abs(denom) < 0.0001f)
+            return false; // Parallel or coincident
+
+        float t = ((p1.x - p3.x) * (p3.z - p4.z) - (p1.z - p3.z) * (p3.x - p4.x)) / denom;
+        float u = -((p1.x - p2.x) * (p1.z - p3.z) - (p1.z - p2.z) * (p1.x - p3.x)) / denom;
+
+        return t >= 0f && t <= 1f && u >= 0f && u <= 1f;
+    }
+
+    private float PointToSegmentDistance2D(Vector3 point, Vector3 segStart, Vector3 segEnd)
+    {
+        Vector2 p = new Vector2(point.x, point.z);
+        Vector2 s = new Vector2(segStart.x, segStart.z);
+        Vector2 e = new Vector2(segEnd.x, segEnd.z);
+
+        Vector2 seg = e - s;
+        float lengthSq = seg.sqrMagnitude;
+        if (lengthSq < 0.0001f)
+            return Vector2.Distance(p, s);
+
+        float t = Mathf.Clamp01(Vector2.Dot(p - s, seg) / lengthSq);
+        return Vector2.Distance(p, s + seg * t);
+    }
+
     private bool IsUTurn(Lane inLane, Lane outLane)
     {
         // Check if the outgoing lane goes back to where the incoming lane came from
@@ -1087,10 +1249,209 @@ public class RoadNetworkGenerator : MonoBehaviour
         {
             Debug.Log($"Removed {totalRemoved} road(s) due to sharp angles (< {MIN_ANGLE_DEGREES}°)");
         }
-        
+
         return mutableConnections;
     }
-    
+
+    /// <summary>
+    /// Final safety net that removes any remaining "impossible intersection" geometry
+    /// the earlier passes let through at high jitter:
+    ///   1. two roads meeting below the minimum angle at a shared node (a thin spike);
+    ///   2. a road whose centreline passes close enough to an unrelated node that its
+    ///      lanes overlap that intersection;
+    ///   3. two unrelated roads whose lanes overlap at grade and cannot be bridged.
+    /// Removals are guarded by a connectivity check (they may create dead-ends, which
+    /// are cleaned afterwards, but never disconnect the graph). Bridgeable crossings
+    /// are left untouched so genuine overpasses survive.
+    /// </summary>
+    private List<RoadConnection> ValidateAndRepairTopology(List<RoadConnection> connections)
+    {
+        const float MIN_ANGLE_DEGREES = 20f;
+        float roadWidth = config.LaneWidth * 2f;
+        // A foreign node closer than this to a road centreline means the road's lanes
+        // cover that intersection.
+        float nodeClearance = roadWidth + config.LaneWidth * 0.5f;
+        // Two unrelated road centrelines closer than this have overlapping lanes.
+        float roadClearance = roadWidth * 0.9f;
+
+        List<RoadConnection> conns = new List<RoadConnection>(connections);
+        int repaired = 0;
+        int guard = 0;
+        int maxIterations = conns.Count * 4 + 20;
+        bool changed = true;
+
+        while (changed && guard++ < maxIterations)
+        {
+            changed = false;
+
+            // 1. Sub-minimum-angle spike at a node.
+            foreach (Node node in roadMap.Nodes)
+            {
+                List<RoadConnection> at = ConnectionsAtNode(conns, node);
+                if (at.Count < 2) continue;
+                if (FindSharpPair(node, at, MIN_ANGLE_DEGREES, out RoadConnection s1, out RoadConnection s2))
+                {
+                    RoadConnection shorter = s1.Length <= s2.Length ? s1 : s2;
+                    RoadConnection longer = s1.Length <= s2.Length ? s2 : s1;
+                    if (TryRemoveRoad(ref conns, shorter) || TryRemoveRoad(ref conns, longer))
+                    {
+                        changed = true;
+                        repaired++;
+                        break;
+                    }
+                }
+            }
+            if (changed) continue;
+
+            // 2. Road grazing an unrelated node.
+            foreach (var conn in conns)
+            {
+                if (FindGrazedNode(conn, nodeClearance) != null && TryRemoveRoad(ref conns, conn))
+                {
+                    changed = true;
+                    repaired++;
+                    break;
+                }
+            }
+            if (changed) continue;
+
+            // 3. Un-bridgeable at-grade overlap between two unrelated roads.
+            for (int i = 0; i < conns.Count && !changed; i++)
+            {
+                for (int j = i + 1; j < conns.Count && !changed; j++)
+                {
+                    RoadConnection a = conns[i];
+                    RoadConnection b = conns[j];
+                    if (ShareNode(a, b)) continue;
+                    if (!RoadsOverlapAtGrade(a, b, roadClearance)) continue;
+
+                    // Leave it if it is a legitimate, bridgeable crossing.
+                    bool crosses = LineSegmentsIntersect(
+                        a.StartNode.Position, a.EndNode.Position,
+                        b.StartNode.Position, b.EndNode.Position, out Vector3 cp);
+                    if (crosses && config.EnableBridges &&
+                        (CanCreateBridge(a, b, cp) || CanCreateBridge(b, a, cp)))
+                        continue;
+
+                    if (TryRemoveRoad(ref conns, a) || TryRemoveRoad(ref conns, b))
+                    {
+                        changed = true;
+                        repaired++;
+                    }
+                }
+            }
+        }
+
+        // Removals may have created dead-ends; clean them (subtractive only, so it
+        // cannot introduce new violations).
+        conns = RemoveInvalidConnections(conns);
+        conns = RemoveDeadEndNodes(conns);
+        conns = RemoveInvalidConnections(conns);
+
+        if (repaired > 0)
+        {
+            Debug.Log($"Topology repair: resolved {repaired} impossible-intersection violation(s)");
+        }
+
+        return conns;
+    }
+
+    private List<RoadConnection> ConnectionsAtNode(List<RoadConnection> conns, Node node)
+    {
+        List<RoadConnection> result = new List<RoadConnection>();
+        foreach (var c in conns)
+        {
+            if (c.StartNode == node || c.EndNode == node)
+                result.Add(c);
+        }
+        return result;
+    }
+
+    private bool FindSharpPair(Node node, List<RoadConnection> at, float minAngleDegrees,
+                               out RoadConnection r1, out RoadConnection r2)
+    {
+        for (int i = 0; i < at.Count; i++)
+        {
+            for (int j = i + 1; j < at.Count; j++)
+            {
+                Vector3 d1 = DirFromNode(at[i], node);
+                Vector3 d2 = DirFromNode(at[j], node);
+                float angle = Mathf.Acos(Mathf.Clamp(Vector3.Dot(d1, d2), -1f, 1f)) * Mathf.Rad2Deg;
+                if (angle < minAngleDegrees)
+                {
+                    r1 = at[i];
+                    r2 = at[j];
+                    return true;
+                }
+            }
+        }
+        r1 = default;
+        r2 = default;
+        return false;
+    }
+
+    private Vector3 DirFromNode(RoadConnection conn, Node node)
+    {
+        Node other = conn.StartNode == node ? conn.EndNode : conn.StartNode;
+        return (other.Position - node.Position).normalized;
+    }
+
+    private Node FindGrazedNode(RoadConnection conn, float clearance)
+    {
+        foreach (Node node in roadMap.Nodes)
+        {
+            if (node == conn.StartNode || node == conn.EndNode)
+                continue;
+            float dist = DistanceFromPointToLineSegment(node.Position, conn.StartNode.Position, conn.EndNode.Position);
+            if (dist < clearance)
+                return node;
+        }
+        return null;
+    }
+
+    private bool ShareNode(RoadConnection a, RoadConnection b)
+    {
+        return a.StartNode == b.StartNode || a.StartNode == b.EndNode ||
+               a.EndNode == b.StartNode || a.EndNode == b.EndNode;
+    }
+
+    private bool RoadsOverlapAtGrade(RoadConnection a, RoadConnection b, float clearance)
+    {
+        float dist = SegmentToSegmentDistanceXZ(
+            a.StartNode.Position, a.EndNode.Position,
+            b.StartNode.Position, b.EndNode.Position);
+        return dist < clearance;
+    }
+
+    private float SegmentToSegmentDistanceXZ(Vector3 a1, Vector3 a2, Vector3 b1, Vector3 b2)
+    {
+        // Crossing segments have zero separation.
+        if (LineSegmentsIntersect(a1, a2, b1, b2))
+            return 0f;
+        // Otherwise the minimum is at one of the four endpoints.
+        float d1 = DistanceFromPointToLineSegment(a1, b1, b2);
+        float d2 = DistanceFromPointToLineSegment(a2, b1, b2);
+        float d3 = DistanceFromPointToLineSegment(b1, a1, a2);
+        float d4 = DistanceFromPointToLineSegment(b2, a1, a2);
+        return Mathf.Min(Mathf.Min(d1, d2), Mathf.Min(d3, d4));
+    }
+
+    /// <summary>
+    /// Remove a road if the network stays connected without it. The removal may leave
+    /// a degree-1 dead-end (cleaned later) but never isolates a node.
+    /// </summary>
+    private bool TryRemoveRoad(ref List<RoadConnection> conns, RoadConnection road)
+    {
+        List<RoadConnection> test = new List<RoadConnection>(conns);
+        test.Remove(road);
+        if (test.Count == 0)
+            return false;
+        if (!IsNetworkConnected(test))
+            return false;
+        conns = test;
+        return true;
+    }
+
     private bool IsNetworkConnected(List<RoadConnection> connections)
     {
         if (roadMap.Nodes.Count == 0 || connections.Count == 0)
