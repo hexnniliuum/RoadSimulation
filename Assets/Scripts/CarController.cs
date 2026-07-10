@@ -182,6 +182,7 @@ public class CarController : MonoBehaviour
         }
 
         limit = Mathf.Min(limit, IntersectionSpeedLimit());
+        limit = Mathf.Min(limit, NextStopLineLookaheadLimit());
 
         if (currentPathType == PathType.TurnCurve && currentTurnCurve is RoundaboutTurnCurve)
         {
@@ -281,6 +282,85 @@ public class CarController : MonoBehaviour
                                          / (MaxAcceleration + ComfortableBraking);
                 limit = Mathf.Min(limit, BrakingSpeedForDistance(distanceToStopLine - STOP_LINE_BUFFER, restartSafeDecel));
             }
+        }
+
+        return limit;
+    }
+
+    /// <summary>
+    /// Speed limit from managed stop lines beyond the current path element. A lane
+    /// shorter than the detection horizon gives the on-lane logic no room to brake,
+    /// so lights and roundabout yield lines are read across the upcoming turn the
+    /// same way FindCarAhead already follows queues across path boundaries.
+    /// </summary>
+    private float NextStopLineLookaheadLimit()
+    {
+        Lane lane;
+        float distanceToLane;
+
+        if (currentPathType == PathType.TurnCurve)
+        {
+            lane = currentTurnCurve.ToLane;
+            distanceToLane = currentTurnCurve.ArcLength - distanceAlongPath;
+        }
+        else
+        {
+            // Beyond the end node requires knowing which turn we'll take:
+            // pre-selected at managed nodes, unique at trivial ones.
+            TurnCurve turn = intendedTurn;
+            if (turn == null && currentLane.EndNode != null &&
+                currentLane.EndNode.IsTrivialIntersection() && currentLane.AvailableTurns.Count > 0)
+            {
+                turn = currentLane.AvailableTurns[0];
+            }
+            if (turn == null)
+                return TargetSpeed;
+
+            lane = turn.ToLane;
+            distanceToLane = (currentLane.Length - distanceAlongPath) + turn.ArcLength;
+        }
+
+        float horizon = INTERSECTION_DETECTION_DISTANCE * 1.5f;
+        float limit = TargetSpeed;
+
+        // Chain through trivial nodes up to the first managed node (the route
+        // beyond it isn't chosen yet) or until the horizon runs out.
+        for (int hop = 0; hop < 4 && lane != null && lane.EndNode != null; hop++)
+        {
+            float lineDistance = distanceToLane + lane.Length - STOP_LINE_BUFFER;
+            if (lineDistance > horizon)
+                break;
+
+            Node node = lane.EndNode;
+            if (!node.IsTrivialIntersection())
+            {
+                if (simulationManager.IntersectionManager.HasTrafficLight(node))
+                {
+                    var lightState = simulationManager.IntersectionManager.GetLightState(node, lane);
+                    if (lightState == StopLightController.LightState.Green)
+                    {
+                        limit = TargetSpeed * 0.85f; // stay stoppable in case of yellow
+                    }
+                    else
+                    {
+                        limit = BrakingSpeedForDistance(lineDistance, ComfortableBraking);
+                    }
+                }
+                else if (node.IsRoundabout)
+                {
+                    // Same ring-speed arrival budget as the on-lane roundabout approach.
+                    limit = Mathf.Sqrt(ROUNDABOUT_SPEED_LIMIT * ROUNDABOUT_SPEED_LIMIT
+                            + 2f * (ComfortableBraking * 0.55f) * Mathf.Max(0f, lineDistance));
+                }
+                break;
+            }
+
+            if (lane.AvailableTurns.Count == 0)
+                break;
+
+            TurnCurve through = lane.AvailableTurns[0];
+            distanceToLane += lane.Length + through.ArcLength;
+            lane = through.ToLane;
         }
 
         return limit;
