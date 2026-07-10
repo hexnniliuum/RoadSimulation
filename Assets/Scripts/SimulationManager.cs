@@ -24,6 +24,10 @@ public class SimulationManager : MonoBehaviour
     [Tooltip("Minimum distance between spawned cars (units)")]
     [SerializeField] private float minSpawnSeparation = 10f;
 
+    [Header("Diagnostics")]
+    [Tooltip("Log abrupt stops to the console as [RBDIAG] lines (braking investigations)")]
+    [SerializeField] private bool logBrakeDiagnostics = false;
+
     private RoadMap roadMap;
     private List<CarController> activeCars = new List<CarController>();
     private int nextCarID = 0;
@@ -33,6 +37,8 @@ public class SimulationManager : MonoBehaviour
 
     private void Start()
     {
+        BrakeDiagnostics.Enabled = logBrakeDiagnostics;
+
         if (generateOnStart)
         {
             GenerateRoadNetwork();
@@ -50,6 +56,12 @@ public class SimulationManager : MonoBehaviour
         {
             intersectionManager.Update(Time.deltaTime);
         }
+    }
+
+    // Lets the diagnostics toggle take effect immediately when flipped mid-play.
+    private void OnValidate()
+    {
+        BrakeDiagnostics.Enabled = logBrakeDiagnostics;
     }
 
     [ContextMenu("Generate Road Network")]

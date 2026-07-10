@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using UnityEngine;
 
 /// <summary>
@@ -39,6 +40,8 @@ public class RoadNetworkGenerator : MonoBehaviour
         connections = RemoveSharpAngleRoads(connections);
 
         connections = ValidateAndRepairTopology(connections);
+
+        SelectRoundaboutNodes(connections);
 
         CreateBridges(connections);
 
@@ -538,6 +541,14 @@ public class RoadNetworkGenerator : MonoBehaviour
     
     private float CalculateStopDistanceAtNode(Node atNode, Node towardNode, List<RoadConnection> connections)
     {
+        // Roundabout arms need their lane ends outside the ring plus room for the
+        // entry connector; the ring absorbs any angle sharpness, so the angle-based
+        // widening below doesn't apply.
+        if (atNode.IsRoundabout)
+        {
+            return RoundaboutSetback();
+        }
+
         // Widens the setback for sharp angles at this node; using the full connection list
         // (not just this road) keeps both ends of an intersection symmetric.
         float baseDistance = config.StopLineDistance;
@@ -599,6 +610,105 @@ public class RoadNetworkGenerator : MonoBehaviour
         return baseDistance;
     }
     
+    /// <summary>
+    /// Lane-end setback from a roundabout node's center: the ring itself plus room
+    /// for the entry connector to curve onto it tangentially.
+    /// </summary>
+    private float RoundaboutSetback()
+    {
+        return config.RoundaboutRadius + Mathf.Max(4f, config.LaneWidth * 1.2f);
+    }
+
+    /// <summary>
+    /// Marks the configured percentage of eligible nodes (3+ roads, arms long enough
+    /// to carry the ring setback at both ends) as roundabouts, busiest intersections
+    /// first: candidates are taken in descending road-count order, with the seeded
+    /// RNG breaking ties so a fixed seed reproduces the same placement. Runs after
+    /// topology is final but before stop distances, which depend on the flag.
+    /// </summary>
+    private void SelectRoundaboutNodes(List<RoadConnection> connections)
+    {
+        if (config.RoundaboutPercentage <= 0f)
+            return;
+
+        Dictionary<Node, int> degree = new Dictionary<Node, int>();
+        foreach (Node node in roadMap.Nodes)
+        {
+            degree[node] = 0;
+        }
+        foreach (var conn in connections)
+        {
+            if (degree.ContainsKey(conn.StartNode)) degree[conn.StartNode]++;
+            if (degree.ContainsKey(conn.EndNode)) degree[conn.EndNode]++;
+        }
+
+        List<Node> candidates = new List<Node>();
+        foreach (Node node in roadMap.Nodes)
+        {
+            if (degree[node] >= 3)
+            {
+                candidates.Add(node);
+            }
+        }
+
+        // Seeded shuffle first, then a stable sort by road count: highest-degree
+        // nodes come first, equal-degree nodes in reproducible random order.
+        for (int i = candidates.Count - 1; i > 0; i--)
+        {
+            int j = random.Next(i + 1);
+            (candidates[i], candidates[j]) = (candidates[j], candidates[i]);
+        }
+        candidates = candidates.OrderByDescending(n => degree[n]).ToList();
+
+        int target = Mathf.RoundToInt(candidates.Count * config.RoundaboutPercentage / 100f);
+        int made = 0;
+
+        foreach (Node candidate in candidates)
+        {
+            if (made >= target)
+                break;
+
+            if (ArmsCanFitRoundabout(candidate, connections))
+            {
+                candidate.IsRoundabout = true;
+                made++;
+            }
+        }
+
+        Debug.Log($"Marked {made}/{candidates.Count} eligible nodes as roundabouts ({config.RoundaboutPercentage:F0}%)");
+    }
+
+    /// <summary>
+    /// Every arm must fit this node's ring setback plus whatever setback the far end
+    /// will claim, with lane length to spare - otherwise CreateRoadsWithLanes would
+    /// scale the setbacks down and put the lane ends inside the ring.
+    /// </summary>
+    private bool ArmsCanFitRoundabout(Node node, List<RoadConnection> connections)
+    {
+        float setback = RoundaboutSetback();
+
+        foreach (var conn in connections)
+        {
+            Node otherEnd;
+            if (conn.StartNode == node)
+                otherEnd = conn.EndNode;
+            else if (conn.EndNode == node)
+                otherEnd = conn.StartNode;
+            else
+                continue;
+
+            // Nodes marked earlier in the selection pass already report the ring setback here.
+            float otherSetback = CalculateStopDistanceAtNode(otherEnd, node, connections);
+
+            if (conn.Length < setback + otherSetback + 4f)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private void CreateRoadsWithLanes(List<RoadConnection> connections, Dictionary<(int, int), float> stopDistances)
     {
         // Pass 3: Create Road objects with pre-computed stop distances and bridges
@@ -682,6 +792,23 @@ public class RoadNetworkGenerator : MonoBehaviour
                     outgoingLanes.Add(road.BackwardLane);
             }
             
+            // Roundabout turns wrap around the ring, so sharpness limits and the
+            // opposite-left flattening pass don't apply; only U-turns stay excluded.
+            if (node.IsRoundabout)
+            {
+                foreach (Lane inLane in incomingLanes)
+                {
+                    foreach (Lane outLane in outgoingLanes)
+                    {
+                        if (IsUTurn(inLane, outLane))
+                            continue;
+
+                        inLane.AvailableTurns.Add(new RoundaboutTurnCurve(inLane, outLane, node.Position, config.RoundaboutRadius));
+                    }
+                }
+                continue;
+            }
+
             // Trivial (2-road) intersections must allow their only turn, even if it's
             // sharper than the normal minimum.
             bool isTrivial = node.IsTrivialIntersection();

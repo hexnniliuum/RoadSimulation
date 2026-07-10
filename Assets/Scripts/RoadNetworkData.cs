@@ -8,6 +8,11 @@ public class Node
     public Vector3 Position; // Y is constant (floor height)
     public List<Road> ConnectedRoads = new List<Road>();
 
+    // Marks this node as a roundabout: turns become RoundaboutTurnCurve ring paths,
+    // entry is arbitrated by ring occupancy instead of the turn-conflict map, and the
+    // node is never signalized. Decided during generation, before lane geometry exists.
+    public bool IsRoundabout;
+
     public Node(int id, Vector3 position)
     {
         ID = id;
@@ -305,7 +310,22 @@ public class TurnCurve
     // it, cars would visibly speed up and slow down through turns.
     private float[] cumulativeLengths;
 
-    public enum TurnType { Straight, Left, Right }
+    public enum TurnType { Straight, Left, Right, Roundabout }
+
+    /// <summary>
+    /// For subclasses with their own path geometry: sets endpoints and type but
+    /// builds no arc table. The subclass must call BuildArcLengthTable() once its
+    /// geometry fields are ready, since the table samples the overridden curve.
+    /// </summary>
+    protected TurnCurve(Lane from, Lane to, TurnType type)
+    {
+        FromLane = from;
+        ToLane = to;
+        StartPoint = from.EndPosition;
+        EndPoint = to.StartPosition;
+        Type = type;
+        ControlPoint = Vector3.Lerp(StartPoint, EndPoint, 0.5f); // placeholder; subclass path math ignores it
+    }
 
     public TurnCurve(Lane from, Lane to, float radius)
     {
@@ -419,7 +439,7 @@ public class TurnCurve
         BuildArcLengthTable();
     }
 
-    private void BuildArcLengthTable()
+    protected void BuildArcLengthTable()
     {
         // Also sets ArcLength as a side effect (the final cumulative length)
         int samples = 24;
@@ -469,7 +489,7 @@ public class TurnCurve
         return 1f;
     }
 
-    public Vector3 GetPointOnCurve(float t)
+    public virtual Vector3 GetPointOnCurve(float t)
     {
         // Quadratic Bezier curve
         t = Mathf.Clamp01(t);
@@ -477,7 +497,7 @@ public class TurnCurve
         return u * u * StartPoint + 2f * u * t * ControlPoint + t * t * EndPoint;
     }
 
-    public Vector3 GetTangentOnCurve(float t)
+    public virtual Vector3 GetTangentOnCurve(float t)
     {
         // Derivative of quadratic Bezier
         t = Mathf.Clamp01(t);
@@ -498,6 +518,267 @@ public class TurnCurve
     public Vector3 GetDirectionAtTime(float t)
     {
         return GetTangentOnCurve(t);
+    }
+}
+
+/// <summary>
+/// Composite turn path through a roundabout: an entry connector (quadratic Bezier)
+/// from the incoming lane onto a circular ring around the node, a ring arc travelled
+/// with the island on the driver's left (right-hand traffic), and an exit connector
+/// back onto the outgoing lane. The ring-coordinate helpers expose where a car is on
+/// the shared ring so entry arbitration and car-following can reason about
+/// circulating traffic across different turn instances of the same roundabout.
+/// </summary>
+[System.Serializable]
+public class RoundaboutTurnCurve : TurnCurve
+{
+    public Vector3 Center;
+    public float Radius;
+    public float EntryAngle; // radians, position angle where the path merges onto the ring
+    public float SweepAngle; // radians travelled along the ring, always > 0
+
+    private Vector3 entryRingPoint;
+    private Vector3 exitRingPoint;
+    private Vector3 entryControl;
+    private Vector3 exitControl;
+    private float entryLength;
+    private float ringLength;
+    private float exitLength;
+
+    // Merge/diverge points are pulled this far along the ring from the arm's radial
+    // direction so connectors join the ring at a shallow tangent instead of head-on.
+    private const float MaxLeadAngle = 20f * Mathf.Deg2Rad;
+
+    public float RingCircumference => 2f * Mathf.PI * Radius;
+    public float ExitAngle => EntryAngle + SweepAngle;
+    public float EntryRingDistance => RingMod(EntryAngle * Radius, RingCircumference);
+    public float ExitRingDistance => RingMod(ExitAngle * Radius, RingCircumference);
+
+    public RoundaboutTurnCurve(Lane from, Lane to, Vector3 center, float radius)
+        : base(from, to, TurnType.Roundabout)
+    {
+        Center = center;
+        Radius = radius;
+
+        float entryArmAngle = PositionAngle(StartPoint);
+        float exitArmAngle = PositionAngle(EndPoint);
+
+        // Shrink the leads on narrow arm gaps so the sweep can never go negative,
+        // which the modulo would otherwise turn into an almost-full extra lap.
+        float armGap = Mod2Pi(exitArmAngle - entryArmAngle);
+        float lead = Mathf.Min(MaxLeadAngle, armGap * 0.25f);
+        EntryAngle = entryArmAngle + lead;
+        SweepAngle = armGap - 2f * lead;
+
+        entryRingPoint = RingPoint(EntryAngle);
+        exitRingPoint = RingPoint(ExitAngle);
+        entryControl = ConnectorControl(StartPoint, from.GetDirection(), entryRingPoint, RingTangent(EntryAngle));
+        exitControl = ConnectorControl(exitRingPoint, RingTangent(ExitAngle), EndPoint, to.GetDirection());
+
+        entryLength = EstimateBezierLength(StartPoint, entryControl, entryRingPoint);
+        ringLength = SweepAngle * Radius;
+        exitLength = EstimateBezierLength(exitRingPoint, exitControl, EndPoint);
+
+        BuildArcLengthTable();
+    }
+
+    private float TotalEstimatedLength => entryLength + ringLength + exitLength;
+
+    public override Vector3 GetPointOnCurve(float t)
+    {
+        float total = TotalEstimatedLength;
+        if (total <= 0.001f)
+            return StartPoint;
+
+        float d = Mathf.Clamp01(t) * total;
+        if (d <= entryLength)
+        {
+            float u = entryLength > 0.001f ? d / entryLength : 1f;
+            return BezierPoint(StartPoint, entryControl, entryRingPoint, u);
+        }
+
+        d -= entryLength;
+        if (d <= ringLength)
+        {
+            return RingPoint(EntryAngle + d / Radius);
+        }
+
+        d -= ringLength;
+        float v = exitLength > 0.001f ? d / exitLength : 1f;
+        return BezierPoint(exitRingPoint, exitControl, EndPoint, v);
+    }
+
+    public override Vector3 GetTangentOnCurve(float t)
+    {
+        float total = TotalEstimatedLength;
+        if (total <= 0.001f)
+            return FromLane.GetDirection();
+
+        float d = Mathf.Clamp01(t) * total;
+        if (d <= entryLength)
+        {
+            float u = entryLength > 0.001f ? d / entryLength : 1f;
+            return BezierTangent(StartPoint, entryControl, entryRingPoint, u);
+        }
+
+        d -= entryLength;
+        if (d <= ringLength)
+        {
+            return RingTangent(EntryAngle + d / Radius);
+        }
+
+        d -= ringLength;
+        float v = exitLength > 0.001f ? d / exitLength : 1f;
+        return BezierTangent(exitRingPoint, exitControl, EndPoint, v);
+    }
+
+    /// <summary>
+    /// Ring coordinate (arc distance in [0, circumference)) the car occupies at the
+    /// given path distance, clamped to the entry point before merging and to the
+    /// exit point after leaving the ring.
+    /// </summary>
+    public float RingPositionOf(float pathDistance)
+    {
+        float ringTravel = Mathf.Clamp(ToEstimateDomain(pathDistance) - entryLength, 0f, ringLength);
+        return RingMod(EntryAngle * Radius + ringTravel, RingCircumference);
+    }
+
+    /// <summary>
+    /// Ring arc distance still to be covered before this path leaves the ring; never negative.
+    /// </summary>
+    public float RemainingRingTravel(float pathDistance)
+    {
+        return ringLength - Mathf.Clamp(ToEstimateDomain(pathDistance) - entryLength, 0f, ringLength);
+    }
+
+    /// <summary>
+    /// Entry-connector distance still to be covered before the path merges onto the ring.
+    /// </summary>
+    public float EntryConnectorRemaining(float pathDistance)
+    {
+        return Mathf.Max(0f, entryLength - ToEstimateDomain(pathDistance));
+    }
+
+    /// <summary>
+    /// Distance travelled past the ring on the exit connector; 0 while still on it.
+    /// </summary>
+    public float ExitConnectorProgress(float pathDistance)
+    {
+        return Mathf.Max(0f, ToEstimateDomain(pathDistance) - entryLength - ringLength);
+    }
+
+    public bool SharesRingWith(RoundaboutTurnCurve other)
+    {
+        return other != null && (other.Center - Center).sqrMagnitude < 0.01f;
+    }
+
+    public float EntryConnectorLength => entryLength;
+    public float RingArcLength => ringLength;
+
+    /// <summary>
+    /// Progress along the ring relative to this path's merge point: negative while
+    /// still on the entry connector, greater than RingArcLength once on the exit
+    /// connector. Lets callers project a car's future ring position linearly.
+    /// </summary>
+    public float SignedRingProgress(float pathDistance)
+    {
+        return ToEstimateDomain(pathDistance) - entryLength;
+    }
+
+    public static float RingMod(float value, float circumference)
+    {
+        float r = value % circumference;
+        return r < 0f ? r + circumference : r;
+    }
+
+    // A car's DistanceAlongPath is true arc length (corrected by the arc-length
+    // table), while segment boundaries live in the estimated-length domain the
+    // composite parameterization uses; rescale before comparing against them.
+    private float ToEstimateDomain(float pathDistance)
+    {
+        if (ArcLength <= 0.001f)
+            return 0f;
+        return Mathf.Clamp01(pathDistance / ArcLength) * TotalEstimatedLength;
+    }
+
+    private float PositionAngle(Vector3 p)
+    {
+        return Mathf.Atan2(p.z - Center.z, p.x - Center.x);
+    }
+
+    private Vector3 RingPoint(float angle)
+    {
+        return Center + new Vector3(Mathf.Cos(angle), 0f, Mathf.Sin(angle)) * Radius;
+    }
+
+    // Tangent of increasing angle: on Unity's XZ plane this circulation keeps the
+    // island on the driver's left, which is the correct sense for right-hand traffic.
+    private Vector3 RingTangent(float angle)
+    {
+        return new Vector3(-Mathf.Sin(angle), 0f, Mathf.Cos(angle));
+    }
+
+    private static float Mod2Pi(float angle)
+    {
+        float r = angle % (2f * Mathf.PI);
+        return r < 0f ? r + 2f * Mathf.PI : r;
+    }
+
+    /// <summary>
+    /// Control point for a connector Bezier: where the start heading meets the
+    /// reversed end heading (same scheme as TurnCurve.CalculateControlPoint),
+    /// with the chord midpoint as fallback for degenerate headings.
+    /// </summary>
+    private static Vector3 ConnectorControl(Vector3 start, Vector3 startDir, Vector3 end, Vector3 endDir)
+    {
+        Vector3 d1 = startDir;
+        Vector3 d2 = -endDir;
+
+        float denom = d1.x * d2.z - d1.z * d2.x;
+        if (Mathf.Abs(denom) > 0.001f)
+        {
+            float t1 = ((end.x - start.x) * d2.z - (end.z - start.z) * d2.x) / denom;
+            float t2 = ((end.x - start.x) * d1.z - (end.z - start.z) * d1.x) / denom;
+            float maxDist = Vector3.Distance(start, end) * 2f;
+
+            if (t1 > 0f && t2 > 0f && t1 < maxDist)
+            {
+                Vector3 control = start + d1 * t1;
+                control.y = start.y;
+                return control;
+            }
+        }
+
+        return Vector3.Lerp(start, end, 0.5f);
+    }
+
+    private static Vector3 BezierPoint(Vector3 a, Vector3 control, Vector3 b, float u)
+    {
+        u = Mathf.Clamp01(u);
+        float w = 1f - u;
+        return w * w * a + 2f * w * u * control + u * u * b;
+    }
+
+    private static Vector3 BezierTangent(Vector3 a, Vector3 control, Vector3 b, float u)
+    {
+        u = Mathf.Clamp01(u);
+        return (2f * (1f - u) * (control - a) + 2f * u * (b - control)).normalized;
+    }
+
+    private static float EstimateBezierLength(Vector3 a, Vector3 control, Vector3 b)
+    {
+        const int samples = 12;
+        float length = 0f;
+        Vector3 prev = a;
+
+        for (int i = 1; i <= samples; i++)
+        {
+            Vector3 p = BezierPoint(a, control, b, i / (float)samples);
+            length += Vector3.Distance(prev, p);
+            prev = p;
+        }
+
+        return length;
     }
 }
 

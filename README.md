@@ -11,6 +11,7 @@ The simulation operates on a right-hand traffic model and generates road network
 *   **Procedural Topology**: Automated generation of nodes and edges with configurable jitter, bridges, and randomized connectivity.
 *   **Agent Dynamics**: Physics-consistent speed control — safe-following with reaction-time headway, smooth braking curves toward stop lines, and cross-segment lookahead so vehicles see traffic through intersections.
 *   **Intersection Logic**: Autonomous conflict resolution using turn-path conflict maps, priority rules, yield-to-committed-traffic and don't-block-the-box rules, deadlock timeouts, and traffic signal state machines with latched stop/go decisions at yellow.
+*   **Roundabouts**: A configurable share of intersections (busiest first) become roundabouts. Entry grants are projected against ring occupancy, latched once a car can no longer stop, and revoked if clearance deteriorates while it still can. Merging, circulating, and exiting cars all follow each other in shared ring coordinates — a car that hasn't merged yet is tracked as a virtual leader at its merge point, so spacing constraints fade in smoothly instead of appearing at close range.
 *   **Telemetry**: High-frequency CSV export of vehicle positions, with a bundled Python analysis script for detecting braking anomalies.
 
 ## Technical Architecture
@@ -26,6 +27,7 @@ The simulation operates on a right-hand traffic model and generates road network
 
 ### Agents
 *   **`CarController`**: Handles individual vehicle state (`OnLane`, `Approaching`, `WaitingToEnter`, `Crossing`), target-speed computation, and path following.
+*   **`BrakeDiagnostics`**: Opt-in console logging of abrupt stops for braking investigations (toggle on `SimulationManager`).
 
 ## Installation
 
@@ -49,7 +51,10 @@ Configuration is managed via the `RoadGenerationConfig` ScriptableObject (`Asset
 | **Grid Dimensions** | 4x3 | Width/height of the node grid. |
 | **Segment Length** | 30-50 | Range for road segment lengths. |
 | **Intersection Jitter** | 3 | Node displacement in world units. |
-| **Traffic Light %** | 100% | Percentage of eligible intersections (3+ roads) to signalize. |
+| **Roundabout %** | 0% | Percentage of eligible intersections (3+ roads) converted to roundabouts, busiest first. Never signalized. |
+| **Roundabout Radius** | 7 | Radius of the circulating ring lane. |
+| **Roundabout Speed Limit** | 8 | Speed cap on roundabout paths; approaches decelerate toward it at the yield line. |
+| **Traffic Light %** | 100% | Percentage of remaining eligible intersections (3+ roads) to signalize. |
 | **Deadlock Timeout** | 5.0s | Time threshold for forced entry during gridlock (unsignalized only). |
 | **Random Seed** | 0 | Fixed seed for reproducible networks (0 = random). |
 

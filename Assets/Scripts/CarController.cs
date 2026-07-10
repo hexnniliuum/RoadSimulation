@@ -59,6 +59,7 @@ public class CarController : MonoBehaviour
     // Defaults; overwritten from RoadConfig in Initialize()
     private float INTERSECTION_DETECTION_DISTANCE = 25f;
     private float STOP_LINE_BUFFER = 0.5f;
+    private float ROUNDABOUT_SPEED_LIMIT = 8f;
 
     // Near-horizon yield distance is INTERSECTION_DETECTION_DISTANCE itself (ties it
     // to the Approaching state so it can't drift if reconfigured); this constant only
@@ -100,6 +101,7 @@ public class CarController : MonoBehaviour
         {
             INTERSECTION_DETECTION_DISTANCE = config.IntersectionDetectionDistance;
             STOP_LINE_BUFFER = config.StopLineBuffer;
+            ROUNDABOUT_SPEED_LIMIT = config.RoundaboutSpeedLimit;
         }
 
         UpdatePositionAndRotation();
@@ -135,13 +137,17 @@ public class CarController : MonoBehaviour
         float distanceDelta = currentSpeed * deltaTime;
         float newDistanceAlongPath = distanceAlongPath + distanceDelta;
 
-        // Last-resort emergency brake; normal spacing is already handled by CalculateTargetSpeed.
-        if (carAhead != null)
+        // Last-resort emergency brake; normal spacing is already handled by
+        // CalculateTargetSpeed. Only fires while actually closing on the leader -
+        // contact is impossible against a faster car, and slamming to zero behind
+        // one that is pulling away (e.g. just merged ahead of us) is pure jolt.
+        if (carAhead != null && currentSpeed > carAhead.CurrentSpeed)
         {
             float predictedGap = gapToCarAhead - distanceDelta
                                  - (CarLength + carAhead.CarLength) * 0.5f;
             if (predictedGap < MinimumCarBuffer * 0.3f)
             {
+                BrakeDiagnostics.LogEmergencyStop(this, carAhead, gapToCarAhead);
                 newDistanceAlongPath = distanceAlongPath;
                 currentSpeed = 0f;
             }
@@ -177,6 +183,11 @@ public class CarController : MonoBehaviour
 
         limit = Mathf.Min(limit, IntersectionSpeedLimit());
 
+        if (currentPathType == PathType.TurnCurve && currentTurnCurve is RoundaboutTurnCurve)
+        {
+            limit = Mathf.Min(limit, ROUNDABOUT_SPEED_LIMIT);
+        }
+
         return limit;
     }
 
@@ -190,9 +201,9 @@ public class CarController : MonoBehaviour
     {
         float bumperGap = centerGap - (CarLength + carAhead.CarLength) * 0.5f;
 
-        if (bumperGap < MinimumCarBuffer * 0.3f)
+        if (bumperGap < MinimumCarBuffer * 0.3f && currentSpeed >= carAhead.CurrentSpeed)
         {
-            return 0f; // dangerously close - stop immediately
+            return 0f; // dangerously close and closing - stop immediately
         }
 
         float freeGap = Mathf.Max(0f, bumperGap - MinimumCarBuffer);
@@ -246,6 +257,19 @@ public class CarController : MonoBehaviour
                 float decel = forcedStop ? MaxBraking * 0.95f : ComfortableBraking;
                 return BrakingSpeedForDistance(distanceToStopLine - STOP_LINE_BUFFER, decel);
             }
+        }
+
+        // Roundabout approach: decelerate toward ring speed at the yield line even
+        // when entry is clear, so a granted car merges at circulating speed. The
+        // decel budget is roughly half of comfortable braking: a grant can be
+        // revoked mid-approach (circulating traffic braking invalidates the
+        // reserved slot), and the remaining headroom is what still lets the car
+        // stop at the line instead of arriving hot with nowhere to go.
+        if (intersection.IsRoundabout)
+        {
+            float approachLimit = Mathf.Sqrt(ROUNDABOUT_SPEED_LIMIT * ROUNDABOUT_SPEED_LIMIT
+                                  + 2f * (ComfortableBraking * 0.55f) * Mathf.Max(0f, distanceToStopLine - STOP_LINE_BUFFER));
+            limit = Mathf.Min(limit, approachLimit);
         }
 
         // Right-of-way / conflict / downstream-space gate (applies on green too)
@@ -319,6 +343,11 @@ public class CarController : MonoBehaviour
         if (intendedTurn == null || targetIntersection == null)
             return false;
 
+        // Roundabout approaches all decelerate to ring speed and yield only to
+        // circulating traffic (handled in the manager's entry check).
+        if (targetIntersection.IsRoundabout)
+            return false;
+
         var allCars = simulationManager.GetAllCars();
 
         foreach (var car in allCars)
@@ -357,6 +386,10 @@ public class CarController : MonoBehaviour
     private bool MustYieldByTurnPriority()
     {
         if (intendedTurn == null || targetIntersection == null)
+            return false;
+
+        // Turn-type priority is meaningless on a ring; circulating traffic wins instead.
+        if (targetIntersection.IsRoundabout)
             return false;
 
         int myPriority = TurnPriority(intendedTurn.Type);
@@ -646,6 +679,16 @@ public class CarController : MonoBehaviour
                     // Leader is on the lane we'll enter after our turn
                     gap = remaining + nextTurn.ArcLength + car.distanceAlongPath;
                 }
+                else if (intendedTurn is RoundaboutTurnCurve approachRing &&
+                         car.currentPathType == PathType.TurnCurve &&
+                         car.currentTurnCurve is RoundaboutTurnCurve aheadRing &&
+                         approachRing.SharesRingWith(aheadRing))
+                {
+                    // Ring traffic ahead of our future merge point, seen while still
+                    // on the feeder lane so the constraint is already active - not
+                    // discovered - at curve entry.
+                    gap = RingFollowGap(approachRing, aheadRing, car);
+                }
             }
             else // on a TurnCurve
             {
@@ -662,6 +705,24 @@ public class CarController : MonoBehaviour
                     // Leader is on our destination lane
                     gap = remaining + car.distanceAlongPath;
                 }
+                else if (currentTurnCurve is RoundaboutTurnCurve myRing &&
+                         car.currentPathType == PathType.TurnCurve &&
+                         car.currentTurnCurve is RoundaboutTurnCurve otherRing &&
+                         myRing.SharesRingWith(otherRing))
+                {
+                    // Leader is circulating the same roundabout on a different turn path
+                    gap = RingFollowGap(myRing, otherRing, car);
+                }
+                else if (currentTurnCurve is RoundaboutTurnCurve ourRing &&
+                         car.currentPathType == PathType.Lane && car.currentLane != null &&
+                         car.intendedTurn is RoundaboutTurnCurve mergerRing &&
+                         ourRing.SharesRingWith(mergerRing))
+                {
+                    // Leader is approaching this roundabout on a feeder lane; project
+                    // it into ring coordinates so a granted merger fades into view
+                    // instead of popping up the frame it enters the curve.
+                    gap = RingFollowGap(ourRing, mergerRing, car);
+                }
             }
 
             if (gap < centerGap)
@@ -672,6 +733,106 @@ public class CarController : MonoBehaviour
         }
 
         return closestAhead;
+    }
+
+    /// <summary>
+    /// Along-path gap to a car converging on, circulating, or leaving the same
+    /// roundabout ring, measured through each car's progress toward and around
+    /// the ring. Either car may still be on its feeder lane (its remaining lane
+    /// distance then counts toward its entry). A leader already on the ring is followed
+    /// by ring arc distance, with exit progress added so it fades out gradually.
+    /// A leader that has not merged yet - however close - is followed as a
+    /// virtual leader at its merge point, padded by how far short of merging it
+    /// will still be when we pass; the padding shrinks smoothly to zero as our
+    /// arrivals converge and equals the real gap the moment it merges, so the
+    /// constraint fades in instead of flipping on at close range. Cars stopped
+    /// short of their merge are yielding to the ring and are never followed -
+    /// treating them as leaders freezes both cars face-to-face at the merge
+    /// point. MaxValue when the other car is not a threat on our remaining path.
+    /// </summary>
+    private float RingFollowGap(RoundaboutTurnCurve myRing, RoundaboutTurnCurve otherRing, CarController other)
+    {
+        // Our own progress toward/around the ring; we may still be on the feeder
+        // lane ourselves (myRing is then our intended turn, not our current path).
+        float myEntryRemaining, myRemainingRing, myPos;
+        if (currentPathType == PathType.TurnCurve)
+        {
+            if (myRing.ExitConnectorProgress(distanceAlongPath) > 0f)
+                return float.MaxValue; // we've left the ring; destination-lane following covers the rest
+
+            myEntryRemaining = myRing.EntryConnectorRemaining(distanceAlongPath);
+            myRemainingRing = myRing.RemainingRingTravel(distanceAlongPath);
+            myPos = myRing.RingPositionOf(distanceAlongPath);
+        }
+        else
+        {
+            myEntryRemaining = (currentLane.Length - distanceAlongPath) + myRing.EntryConnectorLength;
+            myRemainingRing = myRing.RingArcLength;
+            myPos = myRing.EntryRingDistance;
+        }
+
+        bool otherOnCurve = other.currentPathType == PathType.TurnCurve;
+        float theirEntryRemaining, theirExitProgress, theirPos;
+        if (otherOnCurve)
+        {
+            theirEntryRemaining = otherRing.EntryConnectorRemaining(other.distanceAlongPath);
+            theirExitProgress = otherRing.ExitConnectorProgress(other.distanceAlongPath);
+            theirPos = otherRing.RingPositionOf(other.distanceAlongPath);
+        }
+        else
+        {
+            // Still on a feeder lane; a slow car short of the line is being held
+            // at the yield gate (a full entry connector away from the ring), but
+            // one past the line (Crossing) enters regardless of speed.
+            if (other.currentSpeed < 2f && other.currentState != CarState.Crossing)
+                return float.MaxValue;
+
+            theirEntryRemaining = (other.currentLane.Length - other.distanceAlongPath)
+                                  + otherRing.EntryConnectorLength;
+            theirExitProgress = 0f;
+            theirPos = otherRing.EntryRingDistance;
+        }
+
+        float ringGap = RoundaboutTurnCurve.RingMod(theirPos - myPos, myRing.RingCircumference);
+
+        if (ringGap > myRemainingRing + 2f)
+        {
+            // Behind us on the ring. Normally not our problem - except before our
+            // own merge: circulating traffic reaching our entry point first has
+            // right of way there, so follow its projected position past our entry.
+            if (myEntryRemaining > 0f && otherOnCurve &&
+                theirEntryRemaining <= 0f && theirExitProgress <= 0f)
+            {
+                float behindDist = myRing.RingCircumference - ringGap;
+                if (otherRing.RemainingRingTravel(other.distanceAlongPath) + 1f >= behindDist)
+                {
+                    float theirTime = behindDist / Mathf.Max(other.currentSpeed, 0.5f);
+                    float myTime = myEntryRemaining / Mathf.Max(currentSpeed, 2f);
+                    if (theirTime <= myTime)
+                        return myEntryRemaining + (myTime - theirTime) * other.currentSpeed;
+                }
+            }
+            return float.MaxValue;
+        }
+
+        if (otherOnCurve && theirEntryRemaining <= 0f)
+        {
+            // Circulating or leaving the ring ahead of us
+            return myEntryRemaining + ringGap + theirExitProgress;
+        }
+
+        // Converging on a merge point ahead of us but not on the ring yet.
+        if (other.currentSpeed < 0.5f && theirEntryRemaining > 1f)
+            return float.MaxValue; // stopped short of its merge: yielding, not converging
+
+        float myDistToTheirMerge = myEntryRemaining + ringGap;
+        if (myDistToTheirMerge <= 0f)
+            return float.MaxValue;
+
+        float myTimeToTheirMerge = myDistToTheirMerge / Mathf.Max(currentSpeed, 2f);
+        float theirShortfallAtMyPass = Mathf.Max(0f,
+            theirEntryRemaining - other.currentSpeed * myTimeToTheirMerge);
+        return myDistToTheirMerge + theirShortfallAtMyPass;
     }
 
     private void HandleLaneMovement()
@@ -744,6 +905,7 @@ public class CarController : MonoBehaviour
             }
             else
             {
+                BrakeDiagnostics.LogLineStop(this, targetIntersection);
                 currentSpeed = 0f;
 
                 // Resolve overlap gradually (rate-limited) instead of teleporting backwards.
@@ -859,6 +1021,14 @@ public class CarController : MonoBehaviour
         currentTurnCurve = intendedTurn;
         currentPathType = PathType.TurnCurve;
         distanceAlongPath = Mathf.Min(overshoot, currentTurnCurve.ArcLength);
+
+        // The approach limit targets ring speed at the yield line, but brake-tracking
+        // lag can leave a few extra m/s; entering hot overtakes circulating traffic
+        // that the merge projection assumed would stay ahead.
+        if (currentTurnCurve is RoundaboutTurnCurve)
+        {
+            currentSpeed = Mathf.Min(currentSpeed, ROUNDABOUT_SPEED_LIMIT);
+        }
 
         // State remains Crossing - don't change it!
     }

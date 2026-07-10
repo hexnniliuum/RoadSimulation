@@ -27,12 +27,21 @@ public class IntersectionManager
     // with conflicting turns can never both commit to the same phase change.
     private Dictionary<Node, Dictionary<CarController, TurnCurve>> committedRuns;
 
+    // Latched roundabout entry grants: a car granted while still able to stop keeps
+    // the grant through the final meters where it physically can't stop anymore.
+    // Other cars' gate checks see these as reserved gaps, so a fast approach can't
+    // slip past the gate between its last stoppable evaluation and the line.
+    private Dictionary<Node, Dictionary<CarController, RoundaboutTurnCurve>> committedEntries;
+
     // Turns granted this frame, checked so two cars can't be granted conflicting entries simultaneously
     private Dictionary<Node, HashSet<CarController>> carsGrantedThisFrame;
     private Dictionary<Node, HashSet<TurnCurve>> turnsGrantedThisFrame;
 
     // Cached from config for stuck-car detection
     private float detectionDistance = 25f;
+
+    // Cached from config for roundabout merge-time projection
+    private float roundaboutSpeedLimit = 8f;
 
     public void Initialize(RoadMap roadMap, RoadGenerationConfig config)
     {
@@ -42,11 +51,13 @@ public class IntersectionManager
         carBreakingDeadlock = new Dictionary<Node, CarController>();
         breakerAssignedTime = new Dictionary<Node, float>();
         committedRuns = new Dictionary<Node, Dictionary<CarController, TurnCurve>>();
+        committedEntries = new Dictionary<Node, Dictionary<CarController, RoundaboutTurnCurve>>();
         carsGrantedThisFrame = new Dictionary<Node, HashSet<CarController>>();
         turnsGrantedThisFrame = new Dictionary<Node, HashSet<TurnCurve>>();
 
         deadlockTimeout = config.DeadlockTimeout;
         detectionDistance = config.IntersectionDetectionDistance;
+        roundaboutSpeedLimit = config.RoundaboutSpeedLimit;
 
         foreach (var node in roadMap.Nodes)
         {
@@ -57,13 +68,15 @@ public class IntersectionManager
                 carBreakingDeadlock[node] = null;
                 breakerAssignedTime[node] = 0f;
                 committedRuns[node] = new Dictionary<CarController, TurnCurve>();
+                committedEntries[node] = new Dictionary<CarController, RoundaboutTurnCurve>();
                 carsGrantedThisFrame[node] = new HashSet<CarController>();
                 turnsGrantedThisFrame[node] = new HashSet<TurnCurve>();
             }
         }
 
+        // Roundabouts are self-regulating; they never get a signal.
         var candidateNodes = roadMap.Nodes
-            .Where(n => !n.IsTrivialIntersection() && n.ConnectedRoads.Count >= 2)
+            .Where(n => !n.IsTrivialIntersection() && n.ConnectedRoads.Count >= 2 && !n.IsRoundabout)
             .OrderByDescending(n => n.ConnectedRoads.Count)
             .ThenBy(n => n.ID) // deterministic tie-break
             .ToList();
@@ -146,6 +159,14 @@ public class IntersectionManager
         if (carBreakingDeadlock.ContainsKey(intersection) && carBreakingDeadlock[intersection] == car)
         {
             return true;
+        }
+
+        // Roundabouts replace the conflict-map and priority checks below with ring
+        // occupancy: yield only to circulating traffic near the entry point, so
+        // several cars can use the ring at once.
+        if (intersection.IsRoundabout)
+        {
+            return RoundaboutCanEnter(car, fromLane, intendedTurn as RoundaboutTurnCurve, intersection, state);
         }
 
         // Check 3: does the intended turn overlap an active crossing?
@@ -283,6 +304,10 @@ public class IntersectionManager
         {
             runs.Clear();
         }
+        foreach (var entries in committedEntries.Values)
+        {
+            entries.Clear();
+        }
         foreach (var set in carsGrantedThisFrame.Values)
         {
             set.Clear();
@@ -341,6 +366,12 @@ public class IntersectionManager
         }
 
         CancelRunLight(car, intersection);
+
+        // The reservation served its purpose; the car now blocks via activeCrossings.
+        if (committedEntries.ContainsKey(intersection))
+        {
+            committedEntries[intersection].Remove(car);
+        }
 
         if (carBreakingDeadlock[intersection] == car)
         {
@@ -703,6 +734,188 @@ public class IntersectionManager
         return false;
     }
 
+    // Ring arc that must be clear ahead of the merge point at merge time, and the
+    // following distance a circulating car behind the merge point must be left with.
+    // Sized well beyond a car length: the projection assumes constant speeds, so the
+    // margins also have to absorb cars slowing down or speeding back up (a few m/s
+    // over the projection horizon) between the grant and the actual merge.
+    private const float RoundaboutMergeAheadMargin = 10f;
+    private const float RoundaboutMergeBehindMin = 8f;
+    private const float RoundaboutMergeBehindHeadway = 1.2f;
+
+    /// <summary>
+    /// Time for an entering car to cover the given distance, assuming it
+    /// accelerates toward ring speed. A plain distance/speed projection blows up
+    /// for slow queue-restarting requesters - a 4s-capped horizon used to grant
+    /// them entry against circulating cars 30m behind the merge point, which then
+    /// arrived mid-connector, exactly on top of the merge.
+    /// </summary>
+    private float ProjectedMergeTime(CarController car, float distance)
+    {
+        float top = Mathf.Max(roundaboutSpeedLimit, car.CurrentSpeed);
+        float accel = Mathf.Max(car.MaxAcceleration, 0.1f);
+        float timeToTop = (top - car.CurrentSpeed) / accel;
+        float distWhileAccelerating = car.CurrentSpeed * timeToTop + 0.5f * accel * timeToTop * timeToTop;
+
+        if (distWhileAccelerating >= distance)
+        {
+            return (Mathf.Sqrt(car.CurrentSpeed * car.CurrentSpeed + 2f * accel * distance)
+                    - car.CurrentSpeed) / accel;
+        }
+
+        return timeToTop + (distance - distWhileAccelerating) / top;
+    }
+
+    /// <summary>
+    /// Roundabout entry decision with commitment latching. A grant issued while the
+    /// car can still stop is remembered; once the car is inside its stopping
+    /// distance the latched grant carries it through even if clearance has since
+    /// flipped (its gap was reserved - other gate checks saw the commitment).
+    /// Without the latch, every free-flowing approach would pass its final meters
+    /// ungated: at merge speed the whole end of the approach lies inside the
+    /// stopping distance, and a bypass there let cars slam into circulating traffic.
+    /// </summary>
+    private bool RoundaboutCanEnter(CarController car, Lane fromLane, RoundaboutTurnCurve myTurn,
+                                    Node intersection, IntersectionState state)
+    {
+        if (myTurn == null)
+        {
+            return true; // not a roundabout path (shouldn't happen); other checks still guard
+        }
+
+        var committed = committedEntries[intersection];
+
+        // A committed car that ended up (nearly) stopped anyway lost its slot;
+        // holding the reservation would block the ring for nothing.
+        if (committed.ContainsKey(car) && car.CurrentSpeed < 1f)
+        {
+            committed.Remove(car);
+        }
+
+        float distanceToLine = fromLane.Length - car.DistanceAlongPath;
+        float minStoppingDistance = (car.CurrentSpeed * car.CurrentSpeed) / (2f * car.MaxBraking * 0.85f);
+
+        if (RoundaboutEntryClear(car, fromLane, myTurn, state, committed))
+        {
+            // Latch the grant just before the car becomes physically committed, so
+            // the reservation exists for the whole unstoppable window.
+            if (car.CurrentSpeed >= 3f && distanceToLine < minStoppingDistance * 1.5f + 1f)
+            {
+                committed[car] = myTurn;
+            }
+
+            return true;
+        }
+
+        // Clearance lost after latching. The reservation is honored only while the
+        // car genuinely can no longer stop: the grant was projected at constant
+        // speeds, and circulating traffic braking in the meantime (e.g. yielding to
+        // another merger) invalidates the reserved slot - merging into it anyway is
+        // exactly the stale-grant slam. While stopping is still possible, revoke.
+        if (committed.ContainsKey(car))
+        {
+            if (distanceToLine > minStoppingDistance + 0.5f)
+            {
+                committed.Remove(car);
+                return false;
+            }
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Roundabout right-of-way: circulating traffic wins. The check is projected to
+    /// the requester's merge time - entry is allowed only if every car already on
+    /// the ring, or holding an entry commitment, will then be either clear past the
+    /// merge point or far enough behind it to follow smoothly. Projection keeps the
+    /// decision stable while everyone keeps speed, and is what lets several cars
+    /// use the ring at once: traffic that exits before the merge point or is far
+    /// around the ring never blocks.
+    /// </summary>
+    private bool RoundaboutEntryClear(CarController car, Lane fromLane, RoundaboutTurnCurve myTurn,
+                                      IntersectionState state,
+                                      Dictionary<CarController, RoundaboutTurnCurve> committed)
+    {
+        float distToMerge = (fromLane.Length - car.DistanceAlongPath) + myTurn.EntryConnectorLength;
+        float myTimeToMerge = ProjectedMergeTime(car, distToMerge);
+
+        foreach (var crossing in state.activeCrossings)
+        {
+            if (crossing.Key == null || crossing.Key == car)
+                continue;
+            if (!(crossing.Value is RoundaboutTurnCurve theirTurn) || !theirTurn.SharesRingWith(myTurn))
+                continue;
+
+            // A registered car still covering the last stretch of its lane carries a
+            // lane distance, which read as curve distance would project it near the
+            // exit and hide it from the gate exactly while it merges.
+            CarController other = crossing.Key;
+            float progress = other.CurrentPathType == CarController.PathType.TurnCurve
+                ? theirTurn.SignedRingProgress(other.DistanceAlongPath)
+                : -((theirTurn.FromLane.Length - other.DistanceAlongPath) + theirTurn.EntryConnectorLength);
+
+            if (BlocksMyMerge(theirTurn, progress, other.CurrentSpeed, myTurn, myTimeToMerge))
+            {
+                return false;
+            }
+        }
+
+        foreach (var kvp in committed)
+        {
+            CarController other = kvp.Key;
+            if (other == null || other == car)
+                continue;
+            if (other.CurrentPathType != CarController.PathType.Lane || other.CurrentLane == null)
+                continue; // already entered - covered by activeCrossings
+            if (!kvp.Value.SharesRingWith(myTurn))
+                continue;
+
+            // Still on its approach lane: negative ring progress by the distance
+            // it has left to its own merge point.
+            float progress = -((kvp.Value.FromLane.Length - other.DistanceAlongPath)
+                               + kvp.Value.EntryConnectorLength);
+            if (BlocksMyMerge(kvp.Value, progress, other.CurrentSpeed, myTurn, myTimeToMerge))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Whether a car on (or committed to) the ring, at the given signed ring
+    /// progress and speed, will conflict with a merge at myTurn's entry point
+    /// myTimeToMerge seconds from now.
+    /// </summary>
+    private bool BlocksMyMerge(RoundaboutTurnCurve theirTurn, float progress, float theirSpeed,
+                               RoundaboutTurnCurve myTurn, float myTimeToMerge)
+    {
+        if (progress > theirTurn.RingArcLength)
+            return false; // already on its exit connector, diverging from the ring
+
+        float ring = myTurn.RingCircumference;
+        float futureProgress = Mathf.Min(progress + theirSpeed * myTimeToMerge, theirTurn.RingArcLength);
+        if (futureProgress < 0f)
+            return false; // still short of its own merge point at my merge time - not on the ring yet
+        float remainingAfter = theirTurn.RingArcLength - futureProgress;
+        float theirFutureAbs = RoundaboutTurnCurve.RingMod(
+            theirTurn.EntryRingDistance + futureProgress, ring);
+
+        float aheadOfMyEntry = RoundaboutTurnCurve.RingMod(theirFutureAbs - myTurn.EntryRingDistance, ring);
+        if (aheadOfMyEntry < RoundaboutMergeAheadMargin)
+        {
+            return true; // would occupy my merge point when I arrive
+        }
+
+        float behindMyEntry = ring - aheadOfMyEntry;
+        bool stillReachesMyEntry = behindMyEntry <= remainingAfter + 0.5f;
+        float behindMargin = Mathf.Max(RoundaboutMergeBehindMin, theirSpeed * RoundaboutMergeBehindHeadway);
+        return stillReachesMyEntry && behindMyEntry < behindMargin;
+    }
+
     /// <summary>
     /// Right-of-way rank of a turn type: straight (2) beats right (1) beats left (0).
     /// </summary>
@@ -722,6 +935,12 @@ public class IntersectionManager
 
         foreach (var state in intersectionStates.Values)
         {
+            // Roundabout paths all share the ring, so spatial sampling would mark
+            // nearly every pair as conflicting and serialize the whole roundabout;
+            // their interaction is handled by ring occupancy instead.
+            if (state.Node.IsRoundabout)
+                continue;
+
             foreach (var lane in state.incomingLanes)
             {
                 allTurns.AddRange(lane.AvailableTurns);
