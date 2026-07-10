@@ -1,10 +1,8 @@
 using UnityEngine;
 
 /// <summary>
-/// Opt-in console diagnostics for abrupt car stops, used when hunting braking
-/// regressions: filter the console for "[RBDIAG]". Off by default; enable via
-/// the SimulationManager inspector toggle (or set Enabled from code). Stops
-/// below the reporting threshold are routine queue shuffling and stay silent.
+/// Opt-in console diagnostics for abrupt car stops; filter the console for "[RBDIAG]".
+/// Stops below MinReportedSpeed are routine queue shuffling, not regressions, and stay silent.
 /// </summary>
 public static class BrakeDiagnostics
 {

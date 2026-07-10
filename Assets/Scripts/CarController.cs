@@ -192,10 +192,9 @@ public class CarController : MonoBehaviour
     }
 
     /// <summary>
-    /// Fastest speed that still lets us settle in behind the car ahead with
-    /// MinimumCarBuffer spacing using comfortable braking (Krauss safe speed
-    /// with a reaction-time headway). Monotonic in gap, so braking starts
-    /// early and ramps smoothly instead of slamming near the queue tail.
+    /// Krauss safe speed with a reaction-time headway: fastest speed that still settles
+    /// in behind the car ahead at MinimumCarBuffer under comfortable braking, monotonic
+    /// in gap so braking ramps smoothly instead of slamming near the queue tail.
     /// </summary>
     private float SafeFollowingSpeed(CarController carAhead, float centerGap)
     {
@@ -259,12 +258,9 @@ public class CarController : MonoBehaviour
             }
         }
 
-        // Roundabout approach: decelerate toward ring speed at the yield line even
-        // when entry is clear, so a granted car merges at circulating speed. The
-        // decel budget is roughly half of comfortable braking: a grant can be
-        // revoked mid-approach (circulating traffic braking invalidates the
-        // reserved slot), and the remaining headroom is what still lets the car
-        // stop at the line instead of arriving hot with nowhere to go.
+        // Roundabout approach: decelerate to ring speed at the yield line even when entry
+        // is clear, since a grant can still be revoked mid-approach; the half-strength decel
+        // budget leaves headroom to stop at the line instead of arriving hot with nowhere to go.
         if (intersection.IsRoundabout)
         {
             float approachLimit = Mathf.Sqrt(ROUNDABOUT_SPEED_LIMIT * ROUNDABOUT_SPEED_LIMIT
@@ -736,19 +732,11 @@ public class CarController : MonoBehaviour
     }
 
     /// <summary>
-    /// Along-path gap to a car converging on, circulating, or leaving the same
-    /// roundabout ring, measured through each car's progress toward and around
-    /// the ring. Either car may still be on its feeder lane (its remaining lane
-    /// distance then counts toward its entry). A leader already on the ring is followed
-    /// by ring arc distance, with exit progress added so it fades out gradually.
-    /// A leader that has not merged yet - however close - is followed as a
-    /// virtual leader at its merge point, padded by how far short of merging it
-    /// will still be when we pass; the padding shrinks smoothly to zero as our
-    /// arrivals converge and equals the real gap the moment it merges, so the
-    /// constraint fades in instead of flipping on at close range. Cars stopped
-    /// short of their merge are yielding to the ring and are never followed -
-    /// treating them as leaders freezes both cars face-to-face at the merge
-    /// point. MaxValue when the other car is not a threat on our remaining path.
+    /// Along-path gap to another car sharing this roundabout ring. An unmerged leader is
+    /// followed as a virtual leader at its merge point, with padding that shrinks to zero
+    /// as arrival times converge, so the constraint fades in instead of snapping on. A car
+    /// stopped short of its own merge is yielding, not converging, and is never followed
+    /// (else both cars freeze face-to-face at the merge point). MaxValue if not a threat.
     /// </summary>
     private float RingFollowGap(RoundaboutTurnCurve myRing, RoundaboutTurnCurve otherRing, CarController other)
     {
@@ -1053,10 +1041,9 @@ public class CarController : MonoBehaviour
     }
 
     /// <summary>
-    /// Find a safe starting position on a lane, accounting for any cars already on it.
-    /// Cross-boundary following means we normally arrive already slowed, so
-    /// starting at 0 and braking normally is safe; the pathological packed-lane
-    /// case (which the box rule prevents) additionally clamps our speed.
+    /// Cross-boundary following means we normally arrive already slowed, so starting at 0
+    /// and braking normally is safe; a packed destination lane (prevented by the box rule)
+    /// additionally clamps our speed below.
     /// </summary>
     private float FindSafeStartPositionOnLane(Lane lane)
     {
