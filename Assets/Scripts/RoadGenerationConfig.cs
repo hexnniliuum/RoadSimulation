@@ -69,6 +69,17 @@ public class RoadGenerationConfig : ScriptableObject
     [Tooltip("Constant Y position for all road elements")]
     public float FloorHeight = 0f;
 
+    [Header("Roundabout Settings")]
+    [Tooltip("Percentage of eligible intersections (3+ roads) converted to roundabouts (0-100%). Chosen before traffic lights; a roundabout is never signalized.")]
+    [Range(0f, 100f)]
+    public float RoundaboutPercentage = 0f;
+
+    [Tooltip("Radius of the circulating ring lane at roundabout nodes")]
+    public float RoundaboutRadius = 7f;
+
+    [Tooltip("Speed limit for cars while traversing a roundabout")]
+    public float RoundaboutSpeedLimit = 8f;
+
     [Header("Intersection Logic")]
     [Tooltip("Percentage of eligible intersections (3+ roads) to have traffic lights (0-100%)")]
     [Range(0f, 100f)]
@@ -92,6 +103,8 @@ public class RoadGenerationConfig : ScriptableObject
         MaxSegmentLength = Mathf.Max(MinSegmentLength, MaxSegmentLength);
         LaneWidth = Mathf.Max(1f, LaneWidth);
         TurnRadius = Mathf.Max(1f, TurnRadius);
+        RoundaboutRadius = Mathf.Max(3f, RoundaboutRadius);
+        RoundaboutSpeedLimit = Mathf.Max(1f, RoundaboutSpeedLimit);
     }
 }
 

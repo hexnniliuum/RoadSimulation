@@ -9,6 +9,7 @@ public class RoadNetworkVisualizer : MonoBehaviour
     [SerializeField] private bool showLanes = true;
     [SerializeField] private bool showTurnCurves = true;
     [SerializeField] private bool showTrafficLights = true;
+    [SerializeField] private bool showRoundabouts = true;
     [SerializeField] private bool showMetrics = true;
     
     [Header("Colors")]
@@ -16,6 +17,7 @@ public class RoadNetworkVisualizer : MonoBehaviour
     [SerializeField] private Color roadColor = Color.white;
     [SerializeField] private Color laneColor = Color.cyan;
     [SerializeField] private Color turnCurveColor = Color.green;
+    [SerializeField] private Color roundaboutColor = new Color(1f, 0.6f, 0f);
     
     [Header("Sizes")]
     [SerializeField] private float nodeSize = 1f;
@@ -58,6 +60,9 @@ public class RoadNetworkVisualizer : MonoBehaviour
             
         if (showTrafficLights)
             DrawTrafficLights();
+
+        if (showRoundabouts)
+            DrawRoundabouts();
     }
 
     private void DrawNodes()
@@ -170,9 +175,13 @@ public class RoadNetworkVisualizer : MonoBehaviour
                 case TurnCurve.TurnType.Right:
                     Gizmos.color = Color.red;
                     break;
+                case TurnCurve.TurnType.Roundabout:
+                    Gizmos.color = roundaboutColor;
+                    break;
             }
-            
-            int segments = 15;
+
+            // Ring paths are much longer than plain turns and need finer sampling
+            int segments = curve is RoundaboutTurnCurve ? 40 : 15;
             Vector3 prevPoint = curve.GetPointOnCurve(0f);
             
             for (int i = 1; i <= segments; i++)
@@ -220,6 +229,38 @@ public class RoadNetworkVisualizer : MonoBehaviour
         
         Vector3 pos = lane.EndPosition + Vector3.up * 2f;
         Gizmos.DrawSphere(pos, trafficLightSize);
+    }
+
+    private void DrawRoundabouts()
+    {
+        var config = generator?.GetConfig();
+        if (config == null)
+            return;
+
+        Gizmos.color = roundaboutColor;
+
+        foreach (Node node in roadMap.Nodes)
+        {
+            if (!node.IsRoundabout)
+                continue;
+
+            DrawCircle(node.Position, config.RoundaboutRadius);
+            DrawCircle(node.Position, Mathf.Max(1f, config.RoundaboutRadius - config.LaneWidth)); // island edge
+        }
+    }
+
+    private void DrawCircle(Vector3 center, float radius)
+    {
+        const int segments = 32;
+        Vector3 prev = center + new Vector3(radius, 0f, 0f);
+
+        for (int i = 1; i <= segments; i++)
+        {
+            float angle = (i / (float)segments) * 2f * Mathf.PI;
+            Vector3 point = center + new Vector3(Mathf.Cos(angle) * radius, 0f, Mathf.Sin(angle) * radius);
+            Gizmos.DrawLine(prev, point);
+            prev = point;
+        }
     }
 
     private void DrawArrow(Vector3 start, Vector3 end, float arrowHeadLength)
