@@ -9,7 +9,7 @@ The simulation operates on a right-hand traffic model and generates road network
 ### Core Capabilities
 
 *   **Procedural Topology**: Automated generation of nodes and edges with configurable jitter, bridges, and randomized connectivity.
-*   **Agent Dynamics**: Physics-consistent speed control — safe-following with reaction-time headway, smooth braking curves toward stop lines, and cross-segment lookahead so vehicles see traffic through intersections.
+*   **Agent Dynamics**: Physics-consistent speed control — safe-following with reaction-time headway, smooth braking curves toward stop lines, and cross-segment lookahead so vehicles see both traffic and upcoming stop lines through intersections (short connector lanes included).
 *   **Intersection Logic**: Autonomous conflict resolution using turn-path conflict maps, priority rules, yield-to-committed-traffic and don't-block-the-box rules, deadlock timeouts, and traffic signal state machines with latched stop/go decisions at yellow.
 *   **Roundabouts**: A configurable share of intersections (busiest first) become roundabouts. Entry grants are projected against ring occupancy, latched once a car can no longer stop, and revoked if clearance deteriorates while it still can. Merging, circulating, and exiting cars all follow each other in shared ring coordinates — a car that hasn't merged yet is tracked as a virtual leader at its merge point, so spacing constraints fade in smoothly instead of appearing at close range.
 *   **Telemetry**: High-frequency CSV export of vehicle positions, with a bundled Python analysis script for detecting braking anomalies.
