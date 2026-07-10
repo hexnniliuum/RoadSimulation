@@ -620,11 +620,10 @@ public class RoadNetworkGenerator : MonoBehaviour
     }
 
     /// <summary>
-    /// Marks the configured percentage of eligible nodes (3+ roads, arms long enough
-    /// to carry the ring setback at both ends) as roundabouts, busiest intersections
-    /// first: candidates are taken in descending road-count order, with the seeded
-    /// RNG breaking ties so a fixed seed reproduces the same placement. Runs after
-    /// topology is final but before stop distances, which depend on the flag.
+    /// Marks the busiest eligible nodes (3+ roads, arms long enough for the ring setback)
+    /// as roundabouts, using the seeded RNG to break ties so a fixed seed reproduces the
+    /// same placement. Runs after topology is final but before stop distances, which
+    /// depend on the flag.
     /// </summary>
     private void SelectRoundaboutNodes(List<RoadConnection> connections)
     {

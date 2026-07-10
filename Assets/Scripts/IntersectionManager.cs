@@ -734,21 +734,17 @@ public class IntersectionManager
         return false;
     }
 
-    // Ring arc that must be clear ahead of the merge point at merge time, and the
-    // following distance a circulating car behind the merge point must be left with.
-    // Sized well beyond a car length: the projection assumes constant speeds, so the
-    // margins also have to absorb cars slowing down or speeding back up (a few m/s
-    // over the projection horizon) between the grant and the actual merge.
+    // Clearance margins around a ring merge point, sized beyond a car length: the
+    // projection assumes constant speed, so margins must absorb a car slowing down
+    // or speeding up over the projection horizon before the actual merge.
     private const float RoundaboutMergeAheadMargin = 10f;
     private const float RoundaboutMergeBehindMin = 8f;
     private const float RoundaboutMergeBehindHeadway = 1.2f;
 
     /// <summary>
-    /// Time for an entering car to cover the given distance, assuming it
-    /// accelerates toward ring speed. A plain distance/speed projection blows up
-    /// for slow queue-restarting requesters - a 4s-capped horizon used to grant
-    /// them entry against circulating cars 30m behind the merge point, which then
-    /// arrived mid-connector, exactly on top of the merge.
+    /// Time for an entering car to cover the given distance, accounting for acceleration
+    /// toward ring speed. Needed because a flat distance/speed projection underestimates
+    /// arrival time for a slow, queue-restarting car and would grant it entry too early.
     /// </summary>
     private float ProjectedMergeTime(CarController car, float distance)
     {
@@ -767,13 +763,10 @@ public class IntersectionManager
     }
 
     /// <summary>
-    /// Roundabout entry decision with commitment latching. A grant issued while the
-    /// car can still stop is remembered; once the car is inside its stopping
-    /// distance the latched grant carries it through even if clearance has since
-    /// flipped (its gap was reserved - other gate checks saw the commitment).
-    /// Without the latch, every free-flowing approach would pass its final meters
-    /// ungated: at merge speed the whole end of the approach lies inside the
-    /// stopping distance, and a bypass there let cars slam into circulating traffic.
+    /// Roundabout entry with commitment latching: a grant issued while the car can still
+    /// stop is remembered and carries it through once inside stopping distance, even if
+    /// clearance flips - other gate checks already saw the reservation. Without the latch,
+    /// an approach's final stretch (inside stopping distance at merge speed) would be ungated.
     /// </summary>
     private bool RoundaboutCanEnter(CarController car, Lane fromLane, RoundaboutTurnCurve myTurn,
                                     Node intersection, IntersectionState state)
@@ -807,11 +800,9 @@ public class IntersectionManager
             return true;
         }
 
-        // Clearance lost after latching. The reservation is honored only while the
-        // car genuinely can no longer stop: the grant was projected at constant
-        // speeds, and circulating traffic braking in the meantime (e.g. yielding to
-        // another merger) invalidates the reserved slot - merging into it anyway is
-        // exactly the stale-grant slam. While stopping is still possible, revoke.
+        // Clearance lost after latching: honor the reservation only while the car genuinely
+        // can no longer stop. Circulating traffic braking after the grant (e.g. yielding to
+        // another merger) can invalidate the reserved slot; revoke while stopping is still possible.
         if (committed.ContainsKey(car))
         {
             if (distanceToLine > minStoppingDistance + 0.5f)
@@ -826,13 +817,10 @@ public class IntersectionManager
     }
 
     /// <summary>
-    /// Roundabout right-of-way: circulating traffic wins. The check is projected to
-    /// the requester's merge time - entry is allowed only if every car already on
-    /// the ring, or holding an entry commitment, will then be either clear past the
-    /// merge point or far enough behind it to follow smoothly. Projection keeps the
-    /// decision stable while everyone keeps speed, and is what lets several cars
-    /// use the ring at once: traffic that exits before the merge point or is far
-    /// around the ring never blocks.
+    /// Roundabout right-of-way: circulating traffic wins. Entry is allowed only if every
+    /// car on the ring (or committed to enter it) will be clear past the merge point, or far
+    /// enough behind to follow smoothly, once this car actually reaches the merge - which is
+    /// what lets multiple cars share the ring instead of only ever admitting one at a time.
     /// </summary>
     private bool RoundaboutEntryClear(CarController car, Lane fromLane, RoundaboutTurnCurve myTurn,
                                       IntersectionState state,

@@ -522,12 +522,10 @@ public class TurnCurve
 }
 
 /// <summary>
-/// Composite turn path through a roundabout: an entry connector (quadratic Bezier)
-/// from the incoming lane onto a circular ring around the node, a ring arc travelled
-/// with the island on the driver's left (right-hand traffic), and an exit connector
-/// back onto the outgoing lane. The ring-coordinate helpers expose where a car is on
-/// the shared ring so entry arbitration and car-following can reason about
-/// circulating traffic across different turn instances of the same roundabout.
+/// Composite turn path through a roundabout: entry connector (quadratic Bezier) onto a
+/// ring around the node, a ring arc with the island on the driver's left, then an exit
+/// connector back onto the outgoing lane. Ring-coordinate helpers expose where a car sits
+/// on the shared ring so entry arbitration and following can reason across turn instances.
 /// </summary>
 [System.Serializable]
 public class RoundaboutTurnCurve : TurnCurve
