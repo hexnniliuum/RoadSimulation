@@ -346,11 +346,16 @@ public class CarController : MonoBehaviour
                         limit = BrakingSpeedForDistance(lineDistance, ComfortableBraking);
                     }
                 }
-                else if (node.IsRoundabout)
+                else
                 {
-                    // Same ring-speed arrival budget as the on-lane roundabout approach.
-                    limit = Mathf.Sqrt(ROUNDABOUT_SPEED_LIMIT * ROUNDABOUT_SPEED_LIMIT
-                            + 2f * (ComfortableBraking * 0.55f) * Mathf.Max(0f, lineDistance));
+                    // Roundabout yield lines and priority intersections can deny entry
+                    // outright, and a lane this near gives no room to brake after the
+                    // verdict: arrive at a speed the queue-restart budget can still
+                    // stop from - the same curve the on-lane gate check applies - so
+                    // a denial continues the deceleration instead of starting it.
+                    float restartSafeDecel = MaxAcceleration * ComfortableBraking
+                                             / (MaxAcceleration + ComfortableBraking);
+                    limit = BrakingSpeedForDistance(lineDistance, restartSafeDecel);
                 }
                 break;
             }
@@ -652,8 +657,11 @@ public class CarController : MonoBehaviour
             return 0f;
         }
 
+        // The creep floor tapers out near the line: a constant floor would deliver
+        // cars to the stop line still at creep speed, turning every line stop into
+        // a visible one-frame jolt.
         float speed = Mathf.Sqrt(2f * deceleration * distance);
-        return Mathf.Max(speed, 1.5f);
+        return Mathf.Max(speed, Mathf.Min(1.5f, 0.35f + 0.9f * distance));
     }
 
     /// <summary>
@@ -974,7 +982,9 @@ public class CarController : MonoBehaviour
             else
             {
                 BrakeDiagnostics.LogLineStop(this, targetIntersection);
-                currentSpeed = 0f;
+                // Bleed off the arrival speed instead of zeroing it in one frame;
+                // the position clamp below keeps the car from crossing the line.
+                currentSpeed = Mathf.Max(0f, currentSpeed - MaxBraking * Time.deltaTime);
 
                 // Resolve overlap gradually (rate-limited) instead of teleporting backwards.
                 float gapAhead;
